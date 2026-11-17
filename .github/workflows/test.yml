@@ -28,13 +28,13 @@ jobs:
         run: |
           python - <<'PY'
           import pathlib, re, sys
-          skill = pathlib.Path("skills/practice-loop/SKILL.md").read_text(encoding="utf-8")
+          skill = pathlib.Path("SKILL.md").read_text(encoding="utf-8")
           assert skill.startswith("---\n"), "SKILL.md must start with frontmatter"
           header = skill.split("---", 2)[1]
           for key in ("name:", "description:"):
               assert re.search(rf"^{key}", header, re.M), f"missing {key}"
           for ref in re.findall(r"`(references/[^`]+)`", skill):
-              assert pathlib.Path("skills/practice-loop", ref).is_file(), f"missing {ref}"
+              assert pathlib.Path(ref).is_file(), f"missing {ref}"
           print("skill ok")
           PY
       - name: Check installer syntax

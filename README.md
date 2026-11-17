@@ -52,7 +52,7 @@ with shell access.
 | Codex | `~/.agents/skills` | `$practice-loop start` |
 
 Restart or reload the host after installing. Full matrix:
-[`skills/practice-loop/references/hosts.md`](skills/practice-loop/references/hosts.md).
+[`references/hosts.md`](references/hosts.md).
 
 ---
 
@@ -233,7 +233,7 @@ machine:
   move them, open them in another agent.
 
 The full behavioural spec is in
-[`skills/practice-loop/SKILL.md`](skills/practice-loop/SKILL.md), with references
+[`SKILL.md`](SKILL.md), with references
 for question design, grading, authoring, state, and host install.
 
 ---

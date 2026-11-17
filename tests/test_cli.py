@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "practice-loop" / "scripts" / "practice_loop.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "practice_loop.py"
 
 
 class PracticeLoopTest(unittest.TestCase):

@@ -60,9 +60,9 @@ mkdir -p "$(dirname "$AGENTS_DEST")"
 
 install_from_source() {
   mkdir -p "$AGENTS_DEST"
-  # Copy the skill payload only; leave .git and repo docs behind.
-  rm -rf "$AGENTS_DEST/skills" "$AGENTS_DEST/scripts" 2>/dev/null || true
-  cp -R "$SOURCE_DIR/skills/practice-loop/." "$AGENTS_DEST/"
+  # Copy the skill payload only; leave repo docs, tests, and .git behind.
+  rm -rf "$AGENTS_DEST/references" "$AGENTS_DEST/scripts" 2>/dev/null || true
+  cp -R "$SOURCE_DIR/SKILL.md" "$SOURCE_DIR/references" "$SOURCE_DIR/scripts" "$AGENTS_DEST/"
   find "$AGENTS_DEST" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
   find "$AGENTS_DEST" -type f -name '*.pyc' -delete 2>/dev/null || true
 }
@@ -84,15 +84,15 @@ install_from_remote() {
 }
 
 if [ "$COPY" -eq 1 ] || [ "$MODE" = "project" ]; then
-  [ -f "$SOURCE_DIR/skills/practice-loop/SKILL.md" ] \
+  [ -f "$SOURCE_DIR/SKILL.md" ] \
     || die "--copy and --project must run from a practice-loop checkout"
   say "installing from $SOURCE_DIR"
   install_from_source
-elif [ -f "$SOURCE_DIR/skills/practice-loop/SKILL.md" ] && [ -d "$SOURCE_DIR/.git" ]; then
+elif [ -f "$SOURCE_DIR/SKILL.md" ] && [ -d "$SOURCE_DIR/.git" ]; then
   # A checkout installs the published copy so `git pull` keeps it current.
   say "installing from $REPO_URL"
   install_from_remote
-elif [ -f "$SOURCE_DIR/skills/practice-loop/SKILL.md" ]; then
+elif [ -f "$SOURCE_DIR/SKILL.md" ]; then
   say "installing from $SOURCE_DIR"
   install_from_source
 else
