@@ -84,6 +84,15 @@ class PracticeLoopTest(unittest.TestCase):
         self.assertEqual(added["subject_label"], "C# LINQ")
         self.assertTrue((self.ws / "topics" / "csharp-linq").is_dir())
 
+    def test_changing_subjects_prunes_untouched_leftovers(self):
+        self.init("--subjects", "SQL,C# DSA,OOP")
+        self.record("correct", subject="sql", topic="general")
+        self.run_cli("set", "--subjects", "SQL,OOP")
+        state = json.loads((self.ws / ".practice-loop" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["rotation"]["subjects"], ["sql", "oop"])
+        self.assertNotIn("csharp-dsa", state["subjects"])
+        self.assertIn("sql", state["subjects"])
+
     def test_init_does_not_touch_existing_notes(self):
         (self.ws / "notes").mkdir()
         (self.ws / "notes" / "mine.md").write_text("my own notes", encoding="utf-8")

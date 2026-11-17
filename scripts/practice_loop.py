@@ -237,6 +237,12 @@ def apply_subjects(state: Dict[str, Any], value: str) -> "tuple[List[str], Dict[
     state["rotation"]["index"] = 0
     state["rotation"]["cycle"] = 1
     state["pending"] = None
+    # Drop untouched leftovers from an earlier subject list; real progress stays.
+    for slug in [item for item in state.get("subjects", {}) if item not in slugs]:
+        stats = state["subjects"][slug]
+        touched = any(int(stats.get(key) or 0) for key in ("asked", "correct", "partial", "wrong", "skipped"))
+        if not touched and not state.get("weak", {}).get(slug):
+            del state["subjects"][slug]
     return slugs, labels
 
 
