@@ -190,7 +190,7 @@ yours to edit.
 
 ```text
 You:    @practice-loop init
-Agent:  Subjects?  →  [sql, csharp-dsa, oop, dbms]
+Agent:  Subjects?  →  [SQL, C# DSA, OOP, DBMS, C# theory]
         Difficulty? →  [adaptive]
         Types?     →  [mcq, exercise]
         Workspace created at ~/practice/interview-prep
