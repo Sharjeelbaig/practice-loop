@@ -10,8 +10,9 @@ Canonical install location:
 ```
 
 Codex and OpenCode both read `~/.agents/skills` natively. Claude Code reads
-`~/.claude/skills`, so the installer adds a symlink there. One clone, three
-hosts, one progress folder per workspace.
+`~/.claude/skills`, so the installer copies the skill files there. One clone in
+`~/.agents/skills`, one copy for Claude, three hosts, one progress folder per
+workspace. Use `--link-claude` if you would rather symlink.
 
 ## Install
 
@@ -19,8 +20,8 @@ macOS / Linux:
 
 ```bash
 git clone https://github.com/Sharjeelbaig/practice-loop.git ~/.agents/skills/practice-loop
-mkdir -p ~/.claude/skills
-ln -sfn ~/.agents/skills/practice-loop ~/.claude/skills/practice-loop
+mkdir -p ~/.claude/skills/practice-loop
+cp -R ~/.agents/skills/practice-loop/{SKILL.md,references,scripts} ~/.claude/skills/practice-loop/
 ```
 
 Or use the installer, which does the same and verifies the result:
@@ -28,6 +29,9 @@ Or use the installer, which does the same and verifies the result:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Sharjeelbaig/practice-loop/main/install.sh | bash
 ```
+
+Pass `--link-claude` to symlink `~/.claude/skills/practice-loop` at the
+`~/.agents` clone instead of copying the files.
 
 Project-local install (checked into a repo, shared with a team):
 
@@ -40,8 +44,10 @@ Windows (PowerShell):
 
 ```powershell
 git clone https://github.com/Sharjeelbaig/practice-loop.git "$HOME\.agents\skills\practice-loop"
-New-Item -ItemType Directory -Force "$HOME\.claude\skills" | Out-Null
-Copy-Item -Recurse -Force "$HOME\.agents\skills\practice-loop" "$HOME\.claude\skills\practice-loop"
+New-Item -ItemType Directory -Force "$HOME\.claude\skills\practice-loop" | Out-Null
+Copy-Item -Force "$HOME\.agents\skills\practice-loop\SKILL.md" "$HOME\.claude\skills\practice-loop"
+Copy-Item -Recurse -Force "$HOME\.agents\skills\practice-loop\references" "$HOME\.claude\skills\practice-loop"
+Copy-Item -Recurse -Force "$HOME\.agents\skills\practice-loop\scripts" "$HOME\.claude\skills\practice-loop"
 ```
 
 ## Where each host looks

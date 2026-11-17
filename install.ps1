@@ -58,19 +58,12 @@ if (-not (Test-Path (Join-Path $AgentsDest "SKILL.md"))) {
 
 New-Item -ItemType Directory -Force (Split-Path -Parent $ClaudeDest) | Out-Null
 if (Test-Path $ClaudeDest) {
-  if ($Force) {
-    Remove-Item -Recurse -Force $ClaudeDest
-  } else {
-    Write-Host "note: $ClaudeDest exists; leaving it (use -Force)"
-  }
+  Remove-Item -Recurse -Force $ClaudeDest
 }
-if (-not (Test-Path $ClaudeDest)) {
-  try {
-    New-Item -ItemType SymbolicLink -Path $ClaudeDest -Target $AgentsDest -ErrorAction Stop | Out-Null
-  } catch {
-    Copy-Item -Recurse -Force $AgentsDest $ClaudeDest
-  }
-}
+New-Item -ItemType Directory -Force $ClaudeDest | Out-Null
+Copy-Item -Force (Join-Path $AgentsDest "SKILL.md") $ClaudeDest
+Copy-Item -Recurse -Force (Join-Path $AgentsDest "references") $ClaudeDest
+Copy-Item -Recurse -Force (Join-Path $AgentsDest "scripts") $ClaudeDest
 
 if ($Bin -and -not $Project) {
   Write-Host "CLI: $AgentsDest\scripts\practice_loop.py"

@@ -6,6 +6,7 @@
 #   ./install.sh --copy          # copy instead of clone (offline / tarball)
 #   ./install.sh --force         # replace an existing install
 #   ./install.sh --bin           # also link the CLI into ~/.local/bin
+#   ./install.sh --link-claude   # symlink into ~/.claude/skills instead of copying
 #
 # Environment:
 #   PRACTICE_LOOP_REPO   git URL to clone (default: the public repo)
@@ -21,6 +22,7 @@ PROJECT_DIR=""
 COPY=0
 FORCE=0
 WANT_BIN=0
+LINK_CLAUDE=0
 
 usage() {
   sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
@@ -33,6 +35,7 @@ while [ $# -gt 0 ]; do
     --copy) COPY=1; shift ;;
     --force) FORCE=1; shift ;;
     --bin) WANT_BIN=1; shift ;;
+    --link-claude) LINK_CLAUDE=1; shift ;;
     -h|--help) usage ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -83,42 +86,40 @@ install_from_remote() {
   fi
 }
 
-if [ "$COPY" -eq 1 ] || [ "$MODE" = "project" ]; then
-  [ -f "$SOURCE_DIR/SKILL.md" ] \
-    || die "--copy and --project must run from a practice-loop checkout"
-  say "installing from $SOURCE_DIR"
-  install_from_source
-elif [ -f "$SOURCE_DIR/SKILL.md" ] && [ -d "$SOURCE_DIR/.git" ]; then
-  # A checkout installs the published copy so `git pull` keeps it current.
-  say "installing from $REPO_URL"
-  install_from_remote
-elif [ -f "$SOURCE_DIR/SKILL.md" ]; then
-  say "installing from $SOURCE_DIR"
-  install_from_source
+if [ "$SOURCE_DIR" != "$AGENTS_DEST" ]; then
+  if [ "$COPY" -eq 1 ] || [ "$MODE" = "project" ]; then
+    [ -f "$SOURCE_DIR/SKILL.md" ] \
+      || die "--copy and --project must run from a practice-loop checkout"
+    say "installing from $SOURCE_DIR"
+    install_from_source
+  elif [ -f "$SOURCE_DIR/SKILL.md" ] && [ -d "$SOURCE_DIR/.git" ]; then
+    # A checkout installs the published copy so `git pull` keeps it current.
+    say "installing from $REPO_URL"
+    install_from_remote
+  elif [ -f "$SOURCE_DIR/SKILL.md" ]; then
+    say "installing from $SOURCE_DIR"
+    install_from_source
+  else
+    say "installing from $REPO_URL"
+    install_from_remote
+  fi
 else
-  say "installing from $REPO_URL"
-  install_from_remote
+  say "already installed at $AGENTS_DEST"
 fi
 
 [ -f "$AGENTS_DEST/SKILL.md" ] || die "install failed: $AGENTS_DEST/SKILL.md missing"
 
 # Claude Code reads ~/.claude/skills; Codex and OpenCode read ~/.agents/skills.
 mkdir -p "$(dirname "$CLAUDE_DEST")"
-if [ -L "$CLAUDE_DEST" ]; then
-  rm -f "$CLAUDE_DEST"
-elif [ -e "$CLAUDE_DEST" ]; then
-  if [ "$FORCE" -eq 1 ]; then
-    rm -rf "$CLAUDE_DEST"
-  else
-    say "note: $CLAUDE_DEST exists and is not a symlink; leaving it alone (use --force to replace)"
-  fi
-fi
-if [ ! -e "$CLAUDE_DEST" ]; then
-  if ln -sfn "$AGENTS_DEST" "$CLAUDE_DEST" 2>/dev/null; then
-    :
-  else
-    cp -R "$AGENTS_DEST" "$CLAUDE_DEST"
-  fi
+if [ "$LINK_CLAUDE" -eq 1 ]; then
+  rm -rf "$CLAUDE_DEST" 2>/dev/null || true
+  ln -sfn "$AGENTS_DEST" "$CLAUDE_DEST"
+else
+  # A real copy avoids symlink-resolution surprises across hosts and OSes.
+  rm -rf "$CLAUDE_DEST" 2>/dev/null || true
+  mkdir -p "$CLAUDE_DEST"
+  cp -R "$AGENTS_DEST/SKILL.md" "$AGENTS_DEST/references" "$AGENTS_DEST/scripts" "$CLAUDE_DEST/"
+  find "$CLAUDE_DEST" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 fi
 
 if [ "$WANT_BIN" -eq 1 ] && [ "$MODE" = "user" ]; then

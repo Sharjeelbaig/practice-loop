@@ -26,15 +26,19 @@ macOS / Linux:
 
 ```bash
 git clone https://github.com/Sharjeelbaig/practice-loop.git ~/.agents/skills/practice-loop
-mkdir -p ~/.claude/skills
-ln -sfn ~/.agents/skills/practice-loop ~/.claude/skills/practice-loop
+mkdir -p ~/.claude/skills/practice-loop
+cp -R ~/.agents/skills/practice-loop/{SKILL.md,references,scripts} ~/.claude/skills/practice-loop/
 ```
 
-Or:
+Or let the installer do it:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Sharjeelbaig/practice-loop/main/install.sh | bash
 ```
+
+The installer clones into `~/.agents/skills/practice-loop` (used by Codex and
+OpenCode) and copies the skill files into `~/.claude/skills/practice-loop` (used
+by Claude Code). Run `./install.sh --link-claude` if you prefer a symlink.
 
 Windows PowerShell:
 
