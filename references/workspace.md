@@ -86,8 +86,10 @@ Subjects are lowercase kebab-case: `sql`, `csharp-dsa`, `oop`, `dbms`,
 so "C# DSA" becomes `csharp-dsa` and "OOP" becomes `oop`. Keep the slug stable —
 `weak/` and `topics/` are keyed by it.
 
-Titles are for display only; the slug is the identity. Do not rename a subject
-mid-workspace unless the learner asks; add a new one instead.
+Titles are for display only; the slug is the identity. `rotation.labels` keeps
+the learner's wording (`C# DSA`) so screens and reports never show `c-dsa`. Do
+not rename a subject mid-workspace unless the learner asks; add a new one
+instead.
 
 ## Multiple workspaces
 

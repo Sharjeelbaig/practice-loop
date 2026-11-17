@@ -137,6 +137,18 @@ set --limit 10
 set --subjects oop,dbms
 ```
 
+`set --subjects` and `init --subjects` take a comma list of the learner's own
+wording, so quote names with spaces or symbols:
+
+```bash
+init --subjects "SQL,C# DSA,OOP,DBMS,C# theory"
+set --subjects "SQL,C# DSA,OOP,DBMS,C# theory"
+```
+
+Each name is slugified for folder paths (`C# DSA` → `csharp-dsa`) while the
+original text is kept in `rotation.labels` and shown in `status`, `next`,
+`record`, `weak`, `report`, and `history` as `subject_label`.
+
 Changing subjects resets the rotation index and clears the pending slot. It does
 not delete weaknesses or history.
 
@@ -203,7 +215,12 @@ Deletes `state.json`, `history.jsonl`, and the contents of `weak/`. Keeps
     "mastery_streak": 1,
     "limit": 0
   },
-  "rotation": {"subjects": ["sql", "csharp-dsa", "oop"], "index": 1, "cycle": 2},
+  "rotation": {
+    "subjects": ["sql", "csharp-dsa", "oop"],
+    "labels": {"sql": "SQL", "csharp-dsa": "C# DSA", "oop": "OOP"},
+    "index": 1,
+    "cycle": 2
+  },
   "subjects": {
     "sql": {
       "asked": 6, "correct": 4, "partial": 1, "wrong": 1, "skipped": 0,

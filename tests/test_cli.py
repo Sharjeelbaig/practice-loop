@@ -61,6 +61,29 @@ class PracticeLoopTest(unittest.TestCase):
         self.assertFalse(second["created"])
         self.assertEqual(second["subjects"], ["sql", "csharp-dsa"])
 
+    def test_subject_labels_keep_learner_wording(self):
+        first = self.init("--subjects", "SQL,C# DSA,OOP,DBMS,C# theory")
+        self.assertEqual(
+            first["subjects"], ["sql", "csharp-dsa", "oop", "dbms", "csharp-theory"]
+        )
+        self.assertEqual(first["labels"]["csharp-dsa"], "C# DSA")
+        self.assertTrue((self.ws / "topics" / "csharp-dsa").is_dir())
+
+        brief = self.next()
+        self.assertEqual(brief["subject"], "sql")
+        self.assertEqual(brief["subject_label"], "SQL")
+        self.record("correct", topic="general")
+
+        second = self.next()
+        self.assertEqual(second["subject"], "csharp-dsa")
+        self.assertEqual(second["subject_label"], "C# DSA")
+        self.assertEqual(self.run_cli("status")["labels"]["csharp-theory"], "C# theory")
+        self.record("correct", topic="general")
+
+        added = self.run_cli("add-subject", "C# LINQ")
+        self.assertEqual(added["subject_label"], "C# LINQ")
+        self.assertTrue((self.ws / "topics" / "csharp-linq").is_dir())
+
     def test_init_does_not_touch_existing_notes(self):
         (self.ws / "notes").mkdir()
         (self.ws / "notes" / "mine.md").write_text("my own notes", encoding="utf-8")

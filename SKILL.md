@@ -3,7 +3,7 @@ name: practice-loop
 description: Adaptive practice and teaching loop for any subject. Use when the user wants to be quizzed, drilled, or taught with MCQs, coding or SQL exercises, or conceptual questions; when they say practice-loop, practice loop, start practice, quiz me, drill me, test me, teach me, retest my weak topics, or ask what they are weak at; or when the working directory contains a practice-loop workspace (notes/, rough/, weak/, topics/, .practice-loop/). Keeps a strict subject rotation and persistent weakness tracking across sessions and across agents.
 license: MIT
 metadata:
-  version: 1.0.0
+  version: 1.1.0
 ---
 
 # Practice Loop
@@ -89,8 +89,9 @@ Collect only what is missing, using the host's interactive question tool when on
 exists (`question` in OpenCode, `AskUserQuestion` in Claude Code, plain numbered
 options in Codex or any text-only host):
 
-- **Subjects** — the rotation order. Use their words; slugify to `sql`,
-  `csharp-dsa`, `oop`, `dbms`.
+- **Subjects** — the rotation order. Pass their exact words as a comma list;
+  the CLI slugifies for folders and keeps the display name (`C# DSA` stays
+  `C# DSA`, not `c-dsa`).
 - **Material** — topic names, a URL, a file, or "use my notes". If a URL or
   document is given, read it now (see `references/authoring.md`).
 - **Assessment types** — MCQ, exercise, conceptual, or mixed. Default: MCQs and
@@ -102,7 +103,7 @@ options in Codex or any text-only host):
 Then create the workspace with everything already applied:
 
 ```bash
-python3 "$CLI" init --dir . --subjects sql,csharp-dsa,oop \
+python3 "$CLI" init --dir . --subjects "SQL,C# DSA,OOP,DBMS,C# theory" \
   --difficulty adaptive --types mcq,exercise --limit 10
 ```
 
@@ -123,8 +124,9 @@ python3 "$CLI" next --json
 ```
 
 `next` advances nothing and asks nothing. It opens exactly one slot and returns
-a brief: `subject`, `difficulty`, `suggested_type`, `focus`, and any
-`weak_in_subject`.
+a brief: `subject`, `subject_label`, `difficulty`, `suggested_type`, `focus`,
+and any `weak_in_subject`. Show `subject_label` — never the raw slug — in
+anything the learner reads.
 
 - If it returns `ok: false` with `reason: "pending"`, a question is already open.
   Resolve that one first. Never call `next` twice to get a different subject.

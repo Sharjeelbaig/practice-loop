@@ -77,6 +77,7 @@ def now_iso() -> str:
 def slugify(value: str) -> str:
     value = unicodedata.normalize("NFKD", str(value))
     value = value.encode("ascii", "ignore").decode("ascii").lower()
+    value = value.replace("#", "sharp").replace("++", "pp")
     value = re.sub(r"[^a-z0-9]+", "-", value)
     return value.strip("-") or "general"
 
@@ -164,7 +165,7 @@ def default_state() -> Dict[str, Any]:
             "mastery_streak": 1,
             "limit": 0,
         },
-        "rotation": {"subjects": [], "index": 0, "cycle": 1},
+        "rotation": {"subjects": [], "labels": {}, "index": 0, "cycle": 1},
         "subjects": {},
         "pending": None,
         "session": {
@@ -202,7 +203,41 @@ def save_state(ws: Path, state: Dict[str, Any]) -> None:
 
 def ensure_subject(state: Dict[str, Any], slug: str) -> Dict[str, Any]:
     state["subjects"].setdefault(slug, default_subject())
+    state["rotation"].setdefault("labels", {}).setdefault(slug, slug)
     return state["subjects"][slug]
+
+
+def subject_label(state: Dict[str, Any], slug: str) -> str:
+    """Display name for a subject slug; falls back to the slug itself."""
+    return (state.get("rotation", {}).get("labels") or {}).get(slug, slug)
+
+
+def parse_subjects(value: str) -> "tuple[List[str], Dict[str, str]]":
+    """Split a comma list into slugs and a slug -> learner's wording map."""
+    slugs: List[str] = []
+    labels: Dict[str, str] = {}
+    for part in str(value).split(","):
+        raw = part.strip()
+        if not raw:
+            continue
+        slug = slugify(raw)
+        if not slug:
+            continue
+        if slug not in slugs:
+            slugs.append(slug)
+        labels[slug] = raw
+    return slugs, labels
+
+
+def apply_subjects(state: Dict[str, Any], value: str) -> "tuple[List[str], Dict[str, str]]":
+    """Replace the rotation, preserving order and display names."""
+    slugs, labels = parse_subjects(value)
+    state["rotation"]["subjects"] = slugs
+    state["rotation"]["labels"] = labels
+    state["rotation"]["index"] = 0
+    state["rotation"]["cycle"] = 1
+    state["pending"] = None
+    return slugs, labels
 
 
 def read_history(ws: Path) -> List[Dict[str, Any]]:
@@ -414,13 +449,10 @@ def cmd_init(args, ctx: Ctx) -> int:
     created = existing is None
 
     subjects: List[str] = []
+    labels: Dict[str, str] = {}
     if args.subjects:
-        subjects = [slugify(part) for part in str(args.subjects).split(",") if part.strip()]
+        subjects, labels = apply_subjects(state, str(args.subjects))
     if subjects:
-        state["rotation"]["subjects"] = subjects
-        state["rotation"]["index"] = 0
-        state["rotation"]["cycle"] = 1
-        state["pending"] = None
         for slug in subjects:
             ensure_subject(state, slug)
             (target / "topics" / slug).mkdir(parents=True, exist_ok=True)
@@ -453,6 +485,7 @@ def cmd_init(args, ctx: Ctx) -> int:
         "created": created,
         "directories": ["notes", "rough", "weak", "topics", STATE_DIR],
         "subjects": state["rotation"]["subjects"],
+        "labels": state["rotation"].get("labels", {}),
         "difficulty": state["config"]["difficulty"],
         "types": state["config"]["types"],
         "limit": state["config"].get("limit", 0),
@@ -464,7 +497,7 @@ def cmd_init(args, ctx: Ctx) -> int:
         human = f"workspace already initialized: {target}\n"
     human += (
         "folders: notes/ rough/ weak/ topics/ " + STATE_DIR + "/\n"
-        f"subjects: {', '.join(state['rotation']['subjects']) or '(none yet)'}\n"
+        f"subjects: {', '.join(subject_label(state, s) for s in state['rotation']['subjects']) or '(none yet)'}\n"
         f"difficulty: {state['config']['difficulty']}  types: {', '.join(state['config']['types'])}\n"
         f"limit: {state['config'].get('limit', 0) or 'continuous'}\n"
         "next: add subjects, then run start"
@@ -493,6 +526,7 @@ def cmd_status(args, ctx: Ctx) -> int:
         "ok": True,
         "workspace": str(ctx.ws),
         "subjects": subjects,
+        "labels": {sub: subject_label(state, sub) for sub in subjects},
         "position": (rotation["index"] + 1) if subjects else 0,
         "of": len(subjects),
         "cycle": rotation["cycle"],
@@ -515,8 +549,10 @@ def cmd_status(args, ctx: Ctx) -> int:
     lines = [f"workspace: {ctx.ws}"]
     if subjects:
         current = subjects[rotation["index"] % len(subjects)]
-        lines.append(f"rotation: {current} ({rotation['index'] + 1}/{len(subjects)}), cycle {rotation['cycle']}")
-        lines.append("order: " + " → ".join(subjects))
+        lines.append(
+            f"rotation: {subject_label(state, current)} ({rotation['index'] + 1}/{len(subjects)}), cycle {rotation['cycle']}"
+        )
+        lines.append("order: " + " → ".join(subject_label(state, sub) for sub in subjects))
     else:
         lines.append("rotation: no subjects yet")
     lines.append(f"difficulty: {state['config']['difficulty']}  types: {', '.join(state['config']['types'])}")
@@ -532,11 +568,15 @@ def cmd_status(args, ctx: Ctx) -> int:
     lines.append(f"weak topics: {weak_total}")
     if pending:
         lines.append(
-            f"pending: {pending.get('subject')} / {(pending.get('focus') or {}).get('topic') or 'new material'} "
+            f"pending: {subject_label(state, pending.get('subject'))} / {(pending.get('focus') or {}).get('topic') or 'new material'} "
             f"— record or skip it before asking another"
         )
     if payload["teach"]:
-        bits = [f"{sub} {info['completed']} done" for sub, info in payload["teach"].items() if info["completed"]]
+        bits = [
+            f"{subject_label(state, sub)} {info['completed']} done"
+            for sub, info in payload["teach"].items()
+            if info["completed"]
+        ]
         if bits:
             lines.append("teach: " + ", ".join(bits))
     return emit(ctx, payload, "\n".join(lines))
@@ -609,7 +649,7 @@ def cmd_next(args, ctx: Ctx) -> int:
             "pending": pending,
         }
         human = (
-            f"pending question already open: {pending.get('subject')} / "
+            f"pending question already open: {subject_label(state, pending.get('subject'))} / "
             f"{(pending.get('focus') or {}).get('topic') or 'new material'}\n"
             "record it (record --result ...) or skip (record --result skipped) first."
         )
@@ -665,6 +705,7 @@ def cmd_next(args, ctx: Ctx) -> int:
     payload = {
         "ok": True,
         "subject": subject,
+        "subject_label": subject_label(state, subject),
         "position": index + 1,
         "of": len(subjects),
         "cycle": state["rotation"]["cycle"],
@@ -684,7 +725,7 @@ def cmd_next(args, ctx: Ctx) -> int:
     }
 
     lines = [
-        f"ask: {subject} ({index + 1}/{len(subjects)}, cycle {state['rotation']['cycle']})",
+        f"ask: {subject_label(state, subject)} ({index + 1}/{len(subjects)}, cycle {state['rotation']['cycle']})",
         f"difficulty: {difficulty}  type: {suggested}",
     ]
     if focus["kind"] == "weak":
@@ -894,6 +935,7 @@ def cmd_record(args, ctx: Ctx) -> int:
         "ok": True,
         "flow": flow,
         "subject": subject,
+        "subject_label": subject_label(state, subject),
         "topic": topic,
         "result": args.result,
         "weak": None
@@ -911,10 +953,16 @@ def cmd_record(args, ctx: Ctx) -> int:
         "next_subject": state["rotation"]["subjects"][int(state["rotation"]["index"]) % len(state["rotation"]["subjects"])]
         if state["rotation"]["subjects"]
         else None,
+        "next_subject_label": subject_label(
+            state,
+            state["rotation"]["subjects"][int(state["rotation"]["index"]) % len(state["rotation"]["subjects"])],
+        )
+        if state["rotation"]["subjects"]
+        else None,
         "weak_remaining_in_subject": [item["topic"] for item in active],
     }
 
-    lines = [f"recorded: {args.result} — {subject} / {topic or 'general'}"]
+    lines = [f"recorded: {args.result} — {subject_label(state, subject)} / {topic or 'general'}"]
     acc = accuracy(
         stats.get("correct", 0), stats.get("partial", 0), stats.get("wrong", 0)
     )
@@ -933,7 +981,7 @@ def cmd_record(args, ctx: Ctx) -> int:
     elif args.result in ("wrong", "partial"):
         lines.append("weak: not recorded (no topic)")
     if payload["next_subject"]:
-        lines.append(f"next subject: {payload['next_subject']}")
+        lines.append(f"next subject: {subject_label(state, payload['next_subject'])}")
     if flow == "main":
         lines.append("now call next for the following question.")
     return emit(ctx, payload, "\n".join(lines))
@@ -954,6 +1002,7 @@ def cmd_weak(args, ctx: Ctx) -> int:
             rows.append(
                 {
                     "subject": subject,
+                    "subject_label": subject_label(state, subject),
                     "topic": topic,
                     "status": record.get("status"),
                     "misses": record.get("misses", 0),
@@ -974,7 +1023,7 @@ def cmd_weak(args, ctx: Ctx) -> int:
     lines = []
     for row in rows:
         mark = "mastered" if row["status"] == "mastered" else f"{row['misses']} miss"
-        lines.append(f"{row['subject']} / {row['topic']}: {mark}, needs {row['required_streak']} clean")
+        lines.append(f"{row['subject_label']} / {row['topic']}: {mark}, needs {row['required_streak']} clean")
         for item in row["misconceptions"][-2:]:
             lines.append(f"  - {item}")
     return emit(ctx, payload, "\n".join(lines))
@@ -1037,6 +1086,7 @@ def cmd_report(args, ctx: Ctx) -> int:
             ]
         ),
         "by_subject": by_subject,
+        "labels": {sub: subject_label(state, sub) for sub in state["rotation"]["subjects"]},
         "teach_checks": len(teach_rows),
         "weak": [
             {"subject": subject, "topic": topic, "misses": item.get("misses", 0)}
@@ -1066,13 +1116,22 @@ def cmd_report(args, ctx: Ctx) -> int:
         lines.append("by subject:")
         for subject, bucket in sorted(by_subject.items()):
             lines.append(
-                f"  {subject}: {bucket['attempts']} attempts, {pct(bucket['accuracy_weighted'])} weighted "
+                f"  {subject_label(state, subject)}: {bucket['attempts']} attempts, {pct(bucket['accuracy_weighted'])} weighted "
                 f"({bucket['correct']}c/{bucket['partial']}p/{bucket['wrong']}w)"
             )
     if payload["weak"]:
-        lines.append("weakest: " + ", ".join(f"{item['subject']}/{item['topic']} ({item['misses']})" for item in payload["weak"][:5]))
+        lines.append(
+            "weakest: "
+            + ", ".join(
+                f"{subject_label(state, item['subject'])}/{item['topic']} ({item['misses']})"
+                for item in payload["weak"][:5]
+            )
+        )
     if mastered:
-        lines.append("mastered: " + ", ".join(f"{item['subject']}/{item['topic']}" for item in mastered))
+        lines.append(
+            "mastered: "
+            + ", ".join(f"{subject_label(state, item['subject'])}/{item['topic']}" for item in mastered)
+        )
     if teach_rows:
         lines.append(f"teach-flow checks: {len(teach_rows)}")
     return emit(ctx, payload, "\n".join(lines))
@@ -1094,6 +1153,7 @@ def cmd_teach(args, ctx: Ctx) -> int:
     )
     progress.setdefault("completed", [])
     progress.setdefault("attempts", {})
+    label = subject_label(state, subject)
 
     if args.action == "next":
         remaining = [path for path in chunks if path.name not in progress["completed"]]
@@ -1102,6 +1162,7 @@ def cmd_teach(args, ctx: Ctx) -> int:
                 "ok": False,
                 "reason": "no_chunks",
                 "subject": subject,
+                "subject_label": label,
                 "topics_dir": str(ctx.ws / "topics" / subject),
                 "message": "No teaching chunks yet. Author topics/<subject>/*.md first.",
             }
@@ -1115,10 +1176,11 @@ def cmd_teach(args, ctx: Ctx) -> int:
                 "ok": True,
                 "done": True,
                 "subject": subject,
+                "subject_label": label,
                 "completed": progress["completed"],
                 "message": "All chunks completed. Move to the main flow to prove retention.",
             }
-            return emit(ctx, payload, f"teach: {subject} complete ({len(chunks)} chunks) — prove it in the main flow")
+            return emit(ctx, payload, f"teach: {label} complete ({len(chunks)} chunks) — prove it in the main flow")
         current = remaining[0]
         progress["current"] = current.name
         save_state(ctx.ws, state)
@@ -1127,6 +1189,7 @@ def cmd_teach(args, ctx: Ctx) -> int:
             "ok": True,
             "done": False,
             "subject": subject,
+            "subject_label": label,
             "chunk": current.name,
             "path": str(current),
             "title": chunk_title(current),
@@ -1138,7 +1201,7 @@ def cmd_teach(args, ctx: Ctx) -> int:
         return emit(
             ctx,
             payload,
-            f"teach: {subject} chunk {index}/{len(chunks)} — {current.name} ({chunk_title(current)})\n"
+            f"teach: {label} chunk {index}/{len(chunks)} — {current.name} ({chunk_title(current)})\n"
             f"read: {current}",
         )
 
@@ -1172,6 +1235,7 @@ def cmd_teach(args, ctx: Ctx) -> int:
             "session": state["session"]["id"],
             "flow": "teach",
             "subject": subject,
+            "subject_label": label,
             "topic": topic,
             "chunk": chunk,
             "type": args.type or "check",
@@ -1199,13 +1263,13 @@ def cmd_teach(args, ctx: Ctx) -> int:
         else {"topic": topic, "status": weak_record.get("status"), "misses": weak_record.get("misses")},
     }
     if weak_record:
-        lines = [f"teach check failed: {subject} / {topic} ({weak_record.get('misses')} miss) — saved to weak/"]
+        lines = [f"teach check failed: {label} / {topic} ({weak_record.get('misses')} miss) — saved to weak/"]
         lines.append("teach this idea again differently, then re-check. No chunk advance.")
     elif chunk in progress["completed"]:
-        lines = [f"teach check passed: {subject} / {chunk} — chunk complete"]
+        lines = [f"teach check passed: {label} / {chunk} — chunk complete"]
         lines.append(f"remaining: {len(remaining)}")
     else:
-        lines = [f"teach check passed: {subject} / {chunk} — pass --complete when the chunk is mastered"]
+        lines = [f"teach check passed: {label} / {chunk} — pass --complete when the chunk is mastered"]
     return emit(ctx, payload, "\n".join(lines))
 
 
@@ -1215,6 +1279,7 @@ def cmd_teach(args, ctx: Ctx) -> int:
 
 
 def cmd_history(args, ctx: Ctx) -> int:
+    state = load_state(ctx.ws)
     rows = read_history(ctx.ws)
     if args.subject:
         wanted = slugify(args.subject)
@@ -1230,7 +1295,7 @@ def cmd_history(args, ctx: Ctx) -> int:
     for row in recent:
         stamp = str(row.get("ts") or "")[:16].replace("T", " ")
         lines.append(
-            f"{stamp}  {row.get('flow', 'main')[:5]:<5}  {row.get('subject')}/{row.get('topic') or '-'}  "
+            f"{stamp}  {row.get('flow', 'main')[:5]:<5}  {subject_label(state, slugify(row.get('subject') or ''))}/{row.get('topic') or '-'}  "
             f"{row.get('result')}"
         )
         if row.get("misconception"):
@@ -1275,13 +1340,9 @@ def cmd_set(args, ctx: Ctx) -> int:
         state["config"]["continuous"] = args.continuous.lower() in ("1", "true", "yes", "on")
         changed["continuous"] = state["config"]["continuous"]
     if args.subjects:
-        subjects = [slugify(part) for part in args.subjects.split(",") if part.strip()]
+        subjects, labels = apply_subjects(state, args.subjects)
         if not subjects:
             return fail(ctx, "at least one subject is required")
-        state["rotation"]["subjects"] = subjects
-        state["rotation"]["index"] = 0
-        state["rotation"]["cycle"] = 1
-        state["pending"] = None
         for slug in subjects:
             ensure_subject(state, slug)
             (ctx.ws / "topics" / slug).mkdir(parents=True, exist_ok=True)
@@ -1290,7 +1351,9 @@ def cmd_set(args, ctx: Ctx) -> int:
     save_state(ctx.ws, state)
     payload = {"ok": True, "changed": changed, "config": state["config"], "rotation": state["rotation"]}
     lines = [f"updated: {', '.join(changed) or 'nothing'}"]
-    lines.append(f"rotation: {' → '.join(state['rotation']['subjects']) or '(none)'}")
+    lines.append(
+        f"rotation: {' → '.join(subject_label(state, sub) for sub in state['rotation']['subjects']) or '(none)'}"
+    )
     lines.append(f"difficulty: {state['config']['difficulty']}  types: {', '.join(state['config']['types'])}")
     return emit(ctx, payload, "\n".join(lines))
 
@@ -1303,12 +1366,14 @@ def cmd_add_subject(args, ctx: Ctx) -> int:
     created = not (ctx.ws / "topics" / slug).is_dir()
     (ctx.ws / "topics" / slug).mkdir(parents=True, exist_ok=True)
     ensure_subject(state, slug)
+    state["rotation"].setdefault("labels", {})[slug] = args.title or args.name.strip() or slug
     if slug not in state["rotation"]["subjects"]:
         state["rotation"]["subjects"].append(slug)
     save_state(ctx.ws, state)
     payload = {
         "ok": True,
         "subject": slug,
+        "subject_label": subject_label(state, slug),
         "title": args.title or slug,
         "topics_dir": str(ctx.ws / "topics" / slug),
         "rotation": state["rotation"]["subjects"],
@@ -1317,7 +1382,7 @@ def cmd_add_subject(args, ctx: Ctx) -> int:
     return emit(
         ctx,
         payload,
-        f"added: {slug} (position {state['rotation']['subjects'].index(slug) + 1}/{len(state['rotation']['subjects'])})\n"
+        f"added: {subject_label(state, slug)} (position {state['rotation']['subjects'].index(slug) + 1}/{len(state['rotation']['subjects'])})\n"
         f"topics: {ctx.ws / 'topics' / slug}",
     )
 
