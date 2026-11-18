@@ -140,7 +140,75 @@ A course is a roadmap of topics, and each topic is 2–8 chunks. The plan lives 
   filename, or an absolute path.
 
 `teach record` reports `topic_complete` when that topic's last chunk closes, and
-`next` names the following topic/chunk.
+`next` names the following topic/chunk. If a journey is active and the chunk
+completes a scheduled lesson day, it also returns `journey_day` with an
+`action` (`journey wrap ...`).
+
+### `journey`
+
+```bash
+journey [--subject sql] [--today 2026-11-27]
+journey plan --subject sql [--start next-monday|today|YYYY-MM-DD] \
+  [--chunks-per-day 2] [--exam-types mcq,exercise] \
+  [--exam-questions 8] [--exam-scope week|course] [--labs auto|on|off]
+journey exam-done --subject sql --score "7/8" [--notes "..."]
+journey wrap --subject sql [--today YYYY-MM-DD]
+```
+
+`journey` divides the roadmap into teaching days and Friday exams. The first
+call creates a default plan if none exists: start today (Mon–Thu) or next
+Monday, 2 chunks/day, 8 questions, the configured types, weekly scope. Every
+plan and status call writes `topics/<subject>/JOURNEY.md`, the day-by-day
+outline with dates, lesson topics, chunks, exam results, and checkboxes.
+
+The status payload uses `status`. It also returns `outline`, the path to
+`topics/<subject>/JOURNEY.md`; point the learner there when they ask "what does
+the schedule look like?"
+
+| status | Meaning |
+| --- | --- |
+| `teach` | today's teaching session; `session.chunks` is the exact batch |
+| `exam` | the Friday exam; use `session.types`, `question_count`, `topics` |
+| `rest` | weekend, next session is in the future |
+| `ahead` | today's session is already done; wait for the next date |
+| `before_start` | the plan starts later |
+| `complete` | every teaching day and exam is done |
+
+Dates are skipped weekends. A missed teaching day is returned as `late_days`
+instead of skipped. Friday's exam opens only after that week's teaching days are
+complete; falling behind makes Friday a catch-up day first. `--today` previews
+a date without changing state.
+
+Teaching completion is derived from `teach[subject].completed`. Exams close with
+`journey exam-done`, which stores the score under that week. Re-planning clears
+exam history but keeps teaching progress.
+
+`journey wrap` is the end-of-day step after the day's last chunk. It returns two
+assignments and, when the course is practical, one lab task with a `kind`
+(`sql`, `code`, `calculation`, or `exercise`). Theory-only courses return
+`lab.required: false`. `--labs auto` is the default; `on`/`off` override it.
+Submit paths point under `rough/`. `repeat: true` means this day was already
+wrapped; `wrapped` is stored in the journey config.
+
+### `topics` / `list-topics`
+
+```bash
+topics [--subject sql] [--chunks]
+```
+
+Lists every course roadmap with topic and chunk counts. `--chunks` includes
+each chunk. The alias `list-topics` is equivalent.
+
+### `quick-teach`
+
+```bash
+quick-teach "Prompting" [--subject sql]
+```
+
+Starts the first incomplete chunk of one named topic without touching the
+journey calendar or the rotation. If no subject is given it prefers the current
+rotation subject, then searches other courses. Exit 11 if the topic is missing
+or ambiguous.
 
 ### `set`
 
@@ -217,6 +285,7 @@ Deletes `state.json`, `history.jsonl`, and the contents of `weak/`. Keeps
 | 8 | `reset` without `--yes` |
 | 9 | `--subject` contradicts the pending slot |
 | 11 | `teach next --topic` names no topic in the roadmap |
+| 12 | Journey action refused: no plan, wrong session kind, or already complete |
 
 ## `state.json`
 
@@ -253,6 +322,21 @@ Deletes `state.json`, `history.jsonl`, and the contents of `weak/`. Keeps
       "current": "select-basics/filtering-rows.md",
       "checks": 7,
       "attempts": {"select-basics/anatomy-of-a-select.md": {"correct": 2, "partial": 0, "wrong": 0}}
+    }
+  },
+  "journey": {
+    "sql": {
+      "start": "2026-11-23",
+      "chunks_per_day": 2,
+      "exam_types": ["mcq", "exercise"],
+      "exam_questions": 8,
+      "exam_scope": "week",
+      "labs": "auto",
+      "created_at": "...",
+      "exams": {
+        "1": {"completed_at": "...", "date": "2026-11-27", "score": "7/8", "notes": null}
+      },
+      "wrapped": ["w1d1", "w1d2"]
     }
   },
   "weak": {

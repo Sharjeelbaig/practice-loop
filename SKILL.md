@@ -3,7 +3,7 @@ name: practice-loop
 description: Adaptive practice and teaching loop for any subject. Use when the user wants to be quizzed, drilled, or taught with MCQs, coding or SQL exercises, or conceptual questions; when they say practice-loop, practice loop, start practice, quiz me, drill me, test me, teach me, retest my weak topics, or ask what they are weak at; or when the working directory contains a practice-loop workspace (notes/, rough/, weak/, topics/, .practice-loop/). Plans each course as a roadmap of topics, each topic as 2-8 chunks, keeps a strict subject rotation, and tracks weaknesses persistently across sessions and agents.
 license: MIT
 metadata:
-  version: 1.2.0
+  version: 1.4.0
 ---
 
 # Practice Loop
@@ -42,6 +42,12 @@ subject/course → ROADMAP.json → topics (major units) → 2-8 chunks each →
 8. **Plan the whole course before teaching it.** Teaching a subject requires a
    valid `ROADMAP.json`: at least 2 topics, and 2-8 chunks inside every topic.
    Never compress a course into one topic, or a topic into one chunk.
+9. **The journey owns the calendar.** Don't teach ahead of today's journey
+   session, don't skip a missed session, and don't turn a lesson into an exam
+   day early. `quick-teach` is the only off-schedule path, and only when asked.
+10. **Close the day with work.** After the last chunk of a lesson day, call
+    `journey wrap` and present its assignments and lab. A lesson without
+    practice is not finished.
 
 ## 1. Resolve the CLI and workspace
 
@@ -75,7 +81,11 @@ show the menu — do not start asking questions unasked.
 | `start`, "quiz me", "resume", "continue" | §4 Main flow |
 | `teach`, "teach <subject>", "explain X" | §5 Teach flow (plan the course first) |
 | "roadmap", "plan the course", "what will you teach me" | §5.1 Plan the course |
-| "quiz me on my weak topics" | §6 Weakness drill |
+| `journey`, "today's lesson", "start my day" | §6 Journey |
+| "assignments", "homework", "lab", "wrap up" | §6 End of the day |
+| `list-topics`, "what topics", "show the roadmap" | §7 Topics |
+| `quick-teach <topic>`, "teach me <topic>" | §7 Quick teach |
+| "quiz me on my weak topics" | §8 Weakness drill |
 | "what am I weak at", `weak` | `weak --json`, then prioritise |
 | "teach my weak topics" | §5 on those subjects, ordered by misses |
 | `report`, "my score", "history" | `report --json`; `history --json` for attempts |
@@ -269,7 +279,118 @@ python3 "$CLI" teach record --json --subject sql --result correct --complete
 Never claim a chunk is mastered because you explained it well. Only their
 answers count.
 
-## 6. Weakness drill
+## 6. Journey — daily class and Friday exam
+
+`journey` is the daily driver. It divides the roadmap into teaching days and
+weekly exams, and decides what today is. Never ask "what should we learn today?"
+
+```bash
+python3 "$CLI" journey --json
+```
+
+Act on `status`. Every response includes `outline`: the path to
+`topics/<subject>/JOURNEY.md`, a generated day-by-day calendar with dates,
+topics, chunks, and checkboxes. Mention it when the learner asks what the
+schedule looks like; do not read the whole file aloud.
+
+| status | What to do |
+| --- | --- |
+| `teach` | Teach exactly the chunks in `session.chunks`, one at a time, then stop. Do not teach ahead. |
+| `exam` | Run the week's exam from `session.chunks` / `session.topics`, using `session.types` and `session.question_count`. |
+| `rest` | Weekend/rest day. Say when the next session is; do not invent work. |
+| `ahead` | Today's session is already done. Say when the next one opens; offer `quick-teach` only if they ask. |
+| `before_start` | Say the start date and stop. |
+| `complete` | The course is done. Suggest `weak`, `report`, or a new course. |
+
+Journey rules:
+
+- **Teaching day:** for each chunk in `session.chunks`, call
+  `teach next --subject <subject>`, teach it, check it, and record. Stop when
+  that day's `chunk_count` is done. If `chunk_missing`, write that one file
+  first. Do not continue into tomorrow's chunks.
+- **Exam day:** ask `question_count` questions drawn from the week's topics,
+  one at a time. Respect `types`: if it contains `mcq`, use MCQs; if `exercise`,
+  require applied work; if both, mix them. Record each answer as off-rotation
+  main-flow evidence:
+
+```bash
+python3 "$CLI" record --json --subject sql --topic left-join-null --result wrong \
+  --misconception "..."
+```
+
+  Do not call `next` and do not advance the rotation. When the exam is over:
+
+```bash
+python3 "$CLI" journey exam-done --subject sql --score "7/8"
+```
+
+- **Friday:** it is exam day once the week's four teaching days are complete.
+  If the learner is behind, `journey` returns the catch-up lesson first; finish
+  it, call `journey` again, and the exam can open the same day.
+- **Weekends:** rest, unless a lesson or exam is overdue — then the CLI returns
+  it as catch-up.
+- **Pending question:** if `blocked_by_pending` is true, finish or skip the
+  main-flow pending question before the exam.
+- **Changing the plan:** only when asked.
+
+```bash
+python3 "$CLI" journey plan --subject sql --start next-monday \
+  --chunks-per-day 2 --exam-types mcq,exercise --exam-questions 8 \
+  --exam-scope week --labs auto
+```
+
+`--exam-scope week` tests the current week; `course` makes each Friday
+cumulative. Re-planning resets exam history, not teaching progress.
+`--labs auto` enables practical work for code/SQL/maths/AI courses and disables
+it for theory-only courses such as history or law; force it with `on` or `off`.
+
+### End of the day
+
+When the last chunk of the day's session is complete, `teach record` returns
+`journey_day.action`. Call:
+
+```bash
+python3 "$CLI" journey wrap --json
+```
+
+It returns:
+
+- `assignments` — exactly two tasks (teach-back and apply/analysis) with a
+  `submit` path under `rough/`.
+- `lab` — one practical task with a `kind` (`sql`, `code`, `calculation`, or
+  `exercise`) and a submit folder, **or** `required: false` when the course is
+  theory-only.
+- `repeat: true` if this day's assignments were already shown.
+
+Present both assignments and the lab at the end of the lesson, using the
+lesson's actual topic names. Do not grade them on the spot unless the learner
+asks; tell them where to submit and that you will review the work next time.
+Never invent a lab for a course where `lab.required` is false. This wrap-up is
+what turns a lesson into practice.
+
+## 7. Topics and quick teach
+
+`list-topics` shows the roadmap without starting a lesson:
+
+```bash
+python3 "$CLI" topics --json
+python3 "$CLI" topics --json --chunks
+```
+
+Present the subject, topic, and `done/total` counts. Do not dump chunk bodies.
+
+`quick-teach <topic>` starts one named topic directly, outside the journey
+schedule:
+
+```bash
+python3 "$CLI" quick-teach "Prompting" --json --subject sql
+```
+
+It returns the first incomplete chunk of that topic. Teach it normally and
+follow `next` for the rest of the topic. It does **not** change the journey
+calendar or the rotation; use `journey` for the scheduled path.
+
+## 8. Weakness drill
 
 For "quiz me on my weak topics", do **not** touch the rotation. Read
 `weak --json`, then run off-rotation main-flow attempts:
@@ -283,7 +404,7 @@ weakness. Announce the topic before each question. Work from highest `misses`
 first, one question at a time, and stop when the learner stops or the list is
 clear.
 
-## 7. Reports and honesty
+## 9. Reports and honesty
 
 `report --json` returns overall and per-subject accuracy, the current session,
 weakest topics, and mastered topics. `history --json --limit 20` returns the
@@ -295,7 +416,7 @@ When asked "what am I weak at", give a prioritised list with the recorded
 misconception, not just topic names. When asked "teach my weak topics", run §5
 ordered by misses, and keep the main flow's rotation untouched.
 
-## 8. Failure modes to refuse
+## 10. Failure modes to refuse
 
 - Two questions in one message, or a question plus its answer "as an example".
 - Switching subject because the learner is failing; the rotation does not care.

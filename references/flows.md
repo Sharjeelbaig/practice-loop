@@ -144,13 +144,54 @@ python3 "$CLI" teach record --json --subject sql --result correct --complete
 - `teach next --topic <name|slug|number>` starts the first incomplete chunk of
   one topic. It does not change the rotation or course progress elsewhere.
 
+## Journey flow
+
+The journey is the scheduled path through a course. It sits on top of the
+roadmap and the teach flow.
+
+```text
+roadmap chunks
+      │
+      ▼
+journey plan ──► Mon–Thu teaching days + Friday exams
+      │
+      ▼
+journey ──► today's session
+      ├── teach ──► teach next ──► teach ──► record --complete
+      │                                           └── journey wrap (assignments + lab)
+      ├── exam  ──► questions ──► record (off-rotation) ──► journey exam-done
+      ├── rest / ahead / before_start / complete
+      └── catch-up: the first unfinished session, even on a Friday/weekend
+```
+
+- A teaching day closes with `journey wrap`: two assignments plus one lab task
+  when the course is practical. Theory-only courses get analysis assignments and
+  `lab.required: false`.
+- The wrap is presentation, not grading. Submit paths are under `rough/`; review
+  the work at the start of the next session if the learner asks.
+
+- Days are sequential. Missing a day does not skip material; the next `journey`
+  returns the missed session with `late_days`.
+- A teaching day is done when every chunk in `session.chunks` is complete.
+  There is no separate "day done" command.
+- A Friday exam opens only after that week's teaching days are complete.
+  Falling behind turns Friday into catch-up first; after finishing it, the exam
+  can open the same day.
+- Weekends are rest unless the session is overdue.
+- `journey plan` writes the schedule settings; it resets exam history but keeps
+  teaching progress.
+- `journey exam-done` records the score and closes the week. Exam answers were
+  already recorded as off-rotation main-flow attempts, so weaknesses update
+  normally.
+
 ## Switching between flows
 
 | Learner says | Action |
 | --- | --- |
 | "teach me X" while mid-main-flow | Finish or skip the pending question first, then plan the course (§5.1) and `teach next --subject X`. |
 | "quiz me" while mid-teach | Leave teach progress; run the main flow. Chunk progress is preserved. |
-| "quiz me on weak topics" | Off-rotation main-flow records (`weakness.md` → §6 of SKILL.md). Rotation untouched. |
+| `journey` while mid-main-flow | Finish or skip the pending question first; `journey` schedules lessons, not the rotation. |
+| "quiz me on weak topics" | Off-rotation main-flow records (SKILL.md §8). Rotation untouched. |
 | "start over" | `session new`. Keeps history, weaknesses, rotation, and chunks. |
 | "reset everything" | Confirm twice, then `reset --yes`. Keeps notes, rough, topics. |
 

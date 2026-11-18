@@ -25,7 +25,7 @@ my-practice/
 │           ├── inner-joins.md
 │           └── left-join-nulls.md
 ├── .practice-loop/
-│   ├── state.json          rotation, pending question, teach progress
+│   ├── state.json          rotation, pending question, teach and journey progress
 │   └── history.jsonl       append-only attempt log
 └── HOW-IT-WORKS.md         generated primer, never overwritten
 ```

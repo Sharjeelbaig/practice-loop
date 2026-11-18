@@ -16,7 +16,7 @@ import re
 import sys
 import tempfile
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -55,6 +55,9 @@ and remembers what you get wrong.
   weakness.
 - `teach` — teach flow. The agent first writes a complete roadmap of topics,
   then teaches one chunk at a time inside each topic and checks understanding.
+- `journey` — the weekly path. Monday–Thursday are lessons, Friday is an exam.
+  The CLI decides today's session; missed days become catch-up, not skips. Each
+  lesson day ends with assignments and, when the course allows it, a lab task.
 
 Each course is a roadmap of topics; each topic is several small chunks. One
 topic is never one lesson.
@@ -65,8 +68,8 @@ flow proves you can retrieve it cold.
 
 ## Commands
 
-`start`, `teach`, `status`, `weak`, `report`, `hint`, `skip`, `easier`,
-`harder`, `new session`, `reset`.
+`start`, `teach`, `journey`, `list-topics`, `quick-teach`, `status`, `weak`,
+`report`, `hint`, `skip`, `easier`, `harder`, `new session`, `reset`.
 
 Progress lives in this folder, so the same workspace works in OpenCode, Claude
 Code, Codex, or any other agent.
@@ -186,6 +189,7 @@ def default_state() -> Dict[str, Any]:
             "skipped": 0,
         },
         "teach": {},
+        "journey": {},
         "weak": {},
     }
 
@@ -196,7 +200,7 @@ def load_state(ws: Path) -> Dict[str, Any]:
         return default_state()
     state = default_state()
     state.update(raw)
-    for key in ("config", "rotation", "session", "teach", "weak", "subjects"):
+    for key in ("config", "rotation", "session", "teach", "weak", "subjects", "journey"):
         if not isinstance(state.get(key), dict):
             state[key] = default_state()[key]
     state.setdefault("pending", None)
@@ -464,7 +468,6 @@ def cmd_init(args, ctx: Ctx) -> int:
     created = existing is None
 
     subjects: List[str] = []
-    labels: Dict[str, str] = {}
     if args.subjects:
         subjects, _ = apply_subjects(state, str(args.subjects))
     if subjects:
@@ -885,6 +888,428 @@ def render_roadmap_md(ws: Path, state: Dict[str, Any], subject: str, plan: Dict[
     text = "\n".join(lines).rstrip() + "\n"
     atomic_write(roadmap_md_path(ws, subject), text)
     return plan["markdown"]
+
+
+WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+JOURNEY_TYPES = ("mcq", "exercise", "conceptual")
+
+
+def current_subject(state: Dict[str, Any]) -> Optional[str]:
+    subjects = state.get("rotation", {}).get("subjects") or []
+    if not subjects:
+        return None
+    return subjects[int(state["rotation"].get("index", 0)) % len(subjects)]
+
+
+def count_label(count: int, word: str) -> str:
+    return f"{count} {word}" + ("" if count == 1 else "s")
+
+
+def default_journey_start(today: date) -> date:
+    """Start today Mon-Thu, otherwise the coming Monday."""
+    if today.weekday() <= 3:
+        return today
+    return today + timedelta(days=7 - today.weekday())
+
+
+def parse_journey_start(value: Optional[str], today: date) -> date:
+    if not value:
+        return default_journey_start(today)
+    raw = str(value).strip().lower()
+    if raw in ("today", "now"):
+        start = today
+    elif raw in ("next-monday", "monday"):
+        start = today + timedelta(days=(0 - today.weekday()) % 7)
+    else:
+        try:
+            start = date.fromisoformat(str(value).strip())
+        except ValueError:
+            raise ValueError("start must be today, next-monday, or YYYY-MM-DD")
+    if start.weekday() >= 5:
+        start = start + timedelta(days=7 - start.weekday())
+    return start
+
+
+def default_journey_config(state: Dict[str, Any], today: date) -> Dict[str, Any]:
+    types = [item for item in state["config"].get("types", []) if item in JOURNEY_TYPES]
+    return {
+        "start": default_journey_start(today).isoformat(),
+        "chunks_per_day": 2,
+        "exam_types": types or ["mcq", "exercise"],
+        "exam_questions": 8,
+        "exam_scope": "week",
+        "labs": "auto",
+        "created_at": now_iso(),
+        "exams": {},
+        "wrapped": [],
+    }
+
+
+def build_journey_sessions(plan: Dict[str, Any], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Turn roadmap chunks into Mon-Thu teaching days and Friday exams."""
+    chunks = plan["chunks"]
+    chunk_map = {chunk["key"]: chunk for chunk in chunks}
+    try:
+        day = date.fromisoformat(config["start"])
+    except (KeyError, ValueError):
+        day = default_journey_start(date.today())
+    per_day = max(1, min(6, int(config.get("chunks_per_day", 2) or 2)))
+    scope = config.get("exam_scope", "week")
+    sessions: List[Dict[str, Any]] = []
+    index = 0
+    week = 1
+    day_in_week = 0
+    week_teaching = False
+    week_keys: List[str] = []
+    all_keys: List[str] = []
+
+    for _ in range(4000):
+        if index >= len(chunks) and not week_teaching:
+            break
+        weekday = day.weekday()
+        if weekday >= 5:
+            day += timedelta(days=1)
+            continue
+        if weekday <= 3:
+            if index < len(chunks):
+                batch = chunks[index : index + per_day]
+                index += len(batch)
+                keys = [chunk["key"] for chunk in batch]
+                week_keys.extend(keys)
+                all_keys.extend(keys)
+                day_in_week += 1
+                week_teaching = True
+                sessions.append(
+                    {
+                        "id": f"w{week}d{day_in_week}",
+                        "kind": "teach",
+                        "week": week,
+                        "day": day_in_week,
+                        "date": day.isoformat(),
+                        "weekday": WEEKDAY_NAMES[weekday],
+                        "chunks": keys,
+                    }
+                )
+        else:
+            if week_teaching:
+                scope_keys = all_keys if scope == "course" else week_keys
+                topics: List[str] = []
+                for key in scope_keys:
+                    title = chunk_map[key]["topic_title"]
+                    if title not in topics:
+                        topics.append(title)
+                sessions.append(
+                    {
+                        "id": f"w{week}exam",
+                        "kind": "exam",
+                        "week": week,
+                        "date": day.isoformat(),
+                        "weekday": "Fri",
+                        "chunks": list(scope_keys),
+                        "topics": topics,
+                        "question_count": max(1, min(30, int(config.get("exam_questions", 8) or 8))),
+                        "types": list(config.get("exam_types") or ["mcq"]),
+                        "scope": scope,
+                    }
+                )
+                week += 1
+                day_in_week = 0
+                week_teaching = False
+                week_keys = []
+        day += timedelta(days=1)
+    return sessions
+
+
+def journey_session_done(
+    session: Dict[str, Any], completed: set, exams: Dict[str, Any]
+) -> bool:
+    if session["kind"] == "teach":
+        return bool(session["chunks"]) and all(key in completed for key in session["chunks"])
+    return str(session["week"]) in exams
+
+
+PRACTICAL_TERMS = (
+    "sql", "database", "dbms", "query", "queries", "schema", "index", "join",
+    "code", "coding", "programming", "program", "algorithm", "algorithms",
+    "data structure", "data structures", "dsa", "javascript", "typescript",
+    "python", "java", "c#", "csharp", "c++", "cpp", "react", "nestjs", "node",
+    "api", "http", "web", "html", "css", "git", "linux", "terminal", "bash",
+    "security", "testing", "refactoring", "design pattern", "architecture",
+    "domain-driven", "ddd", "langchain", "langgraph", "machine learning",
+    "deep learning", "llm", "llms", "ai", "rag", "prompting", "prompt",
+    "embeddings", "retrieval", "excel", "spreadsheet", "math", "statistics",
+    "probability", "physics", "chemistry", "biology", "engineering", "finance",
+    "accounting", "mathematics", "calculus", "algebra",
+)
+THEORY_TERMS = (
+    "history", "historical", "law", "legal", "literature", "philosophy",
+    "ethics", "poetry", "political science", "politics", "sociology",
+    "anthropology", "art history", "music theory", "religion", "theology",
+)
+
+
+def term_present(text: str, term: str) -> bool:
+    return re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", text) is not None
+
+
+def course_text(plan: Dict[str, Any], subject: str) -> str:
+    parts = [subject, plan.get("title") or "", plan.get("outcome") or ""]
+    for topic in plan["topics"]:
+        parts.extend([topic["title"], topic.get("outcome") or ""])
+        parts.extend(chunk["title"] for chunk in topic["chunks"])
+    return " ".join(parts).lower()
+
+
+def course_is_practical(plan: Dict[str, Any], subject: str) -> bool:
+    text = course_text(plan, subject)
+    if any(term_present(text, term) for term in PRACTICAL_TERMS):
+        return True
+    if any(term_present(text, term) for term in THEORY_TERMS):
+        return False
+    return True
+
+
+def lab_kind_for(plan: Dict[str, Any], subject: str) -> str:
+    text = course_text(plan, subject)
+    if any(term_present(text, term) for term in ("sql", "database", "dbms", "query", "queries", "schema", "index", "join")):
+        return "sql"
+    if any(term_present(text, term) for term in ("math", "mathematics", "calculus", "algebra", "statistics", "probability", "physics", "chemistry", "calculation")):
+        return "calculation"
+    if any(term_present(text, term) for term in PRACTICAL_TERMS):
+        return "code"
+    return "exercise"
+
+
+def assignments_payload(
+    session: Dict[str, Any],
+    plan: Dict[str, Any],
+    config: Dict[str, Any],
+    subject: str,
+) -> "tuple[Dict[str, Any], Dict[str, Any]]":
+    chunk_map = {chunk["key"]: chunk for chunk in plan["chunks"]}
+    chunks = [chunk_map[key] for key in session["chunks"] if key in chunk_map]
+    topics: List[str] = []
+    for chunk in chunks:
+        if chunk["topic_title"] not in topics:
+            topics.append(chunk["topic_title"])
+    focus = "; ".join(f"{chunk['topic_title']} / {chunk['title']}" for chunk in chunks)
+    subject_dir = f"rough/{slugify(subject)}"
+    practical = course_is_practical(plan, subject)
+    if practical:
+        apply_item = {
+            "kind": "apply",
+            "brief": (
+                f"Create and solve one new problem that uses {focus}. "
+                "Show your steps, not just the final answer."
+            ),
+        }
+    else:
+        apply_item = {
+            "kind": "analysis",
+            "brief": (
+                f"Write a short evidence-based answer on {focus}: compare the ideas, "
+                "then name one cause and one consequence in your own words."
+            ),
+        }
+    assignments = {
+        "count": 2,
+        "items": [
+            {
+                "kind": "teach-back",
+                "brief": (
+                    f"Close the lesson notes and explain {focus} in your own words. "
+                    "Give one example that was not in the lesson."
+                ),
+            },
+            apply_item,
+        ],
+        "submit": f"{subject_dir}/{session['date']}-assignments.md",
+    }
+
+    mode = config.get("labs", "auto")
+    enabled = mode == "on" or (mode == "auto" and practical)
+    if not enabled:
+        lab = {
+            "required": False,
+            "reason": "This is a theory-only course, so there is no lab task.",
+            "mode": mode,
+        }
+        return assignments, lab
+
+    kind = lab_kind_for(plan, subject)
+    if kind == "sql":
+        brief = f"Write and run 2-3 SQL queries that use {focus}. Save the SQL and the result tables."
+    elif kind == "calculation":
+        brief = f"Solve three new calculation problems that use {focus}. Show every step and check one answer."
+    elif kind == "code":
+        brief = f"Build a small working program that uses {focus}. Save the source, the run command, and the output."
+    else:
+        brief = f"Make a small applied artifact that uses {focus}. Write one paragraph on what it demonstrates."
+    lab = {
+        "required": True,
+        "kind": kind,
+        "brief": brief,
+        "submit": f"{subject_dir}/{session['date']}-lab/",
+        "mode": mode,
+    }
+    return assignments, lab
+
+
+def journey_outline_path(ws: Path, subject: str) -> Path:
+    return ws / "topics" / slugify(subject) / "JOURNEY.md"
+
+
+def render_journey_md(
+    ws: Path,
+    state: Dict[str, Any],
+    subject: str,
+    plan: Dict[str, Any],
+    config: Dict[str, Any],
+) -> str:
+    """Render the day-by-day course outline next to the roadmap."""
+    sessions = build_journey_sessions(plan, config)
+    completed = set(teach_progress(state, subject)["completed"])
+    exams = config.get("exams") or {}
+    counts = journey_counts(sessions, completed, exams)
+    chunk_map = {chunk["key"]: chunk for chunk in plan["chunks"]}
+    title = plan["title"] or subject_label(state, subject)
+
+    lines = [f"# {title} — Journey outline", ""]
+    lines.append(
+        f"Start **{config.get('start')}** · {config.get('chunks_per_day', 2)} chunks/day · "
+        f"{config.get('exam_questions', 8)} questions/exam · {config.get('exam_scope', 'week')} scope"
+    )
+    lines.append(
+        f"Progress: **{counts['teaching_done']}/{counts['teaching_total']}** teaching days · "
+        f"**{counts['exams_done']}/{counts['exams_total']}** exams · "
+        f"**{counts['chunks_done']}/{counts['chunks_total']}** chunks"
+    )
+    lines.append("")
+
+    current_week = None
+    for session in sessions:
+        if session["week"] != current_week:
+            current_week = session["week"]
+            lines += [f"## Week {current_week}", ""]
+        planned = date.fromisoformat(session["date"])
+        day_label = planned.strftime("%a %d %b")
+        if session["kind"] == "teach":
+            done = journey_session_done(session, completed, exams)
+            topics: List[str] = []
+            for key in session["chunks"]:
+                topic_title = chunk_map[key]["topic_title"]
+                if topic_title not in topics:
+                    topics.append(topic_title)
+            heading = topics[0] if len(topics) == 1 else f"{len(topics)} topics"
+            mark = "x" if done else " "
+            lines.append(f"### {day_label} · Lesson {session['day']} — {heading} [{mark}]")
+            for key in session["chunks"]:
+                chunk = chunk_map[key]
+                box = "x" if key in completed else " "
+                lines.append(f"- [{box}] {chunk['topic_title']} / {chunk['title']}")
+            lines.append("")
+        else:
+            done = str(session["week"]) in exams
+            mark = "x" if done else " "
+            lines.append(
+                f"### {day_label} · Week {session['week']} exam — "
+                f"{session['question_count']} questions ({', '.join(session['types'])}) [{mark}]"
+            )
+            lines.append(f"Covers: {'; '.join(session['topics'])}")
+            if done:
+                score = exams[str(session["week"])].get("score")
+                lines.append(f"Result: {score or 'recorded'}")
+            lines.append("")
+
+    lines.append("_Generated from ROADMAP.json and the journey settings. Edit those, not this file._")
+    text = "\n".join(lines).rstrip() + "\n"
+    path = journey_outline_path(ws, subject)
+    atomic_write(path, text)
+    return str(path)
+
+
+def first_open_session(
+    sessions: List[Dict[str, Any]], completed: set, exams: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    for session in sessions:
+        if not journey_session_done(session, completed, exams):
+            return session
+    return None
+
+
+def journey_counts(
+    sessions: List[Dict[str, Any]], completed: set, exams: Dict[str, Any]
+) -> Dict[str, int]:
+    teaching = [item for item in sessions if item["kind"] == "teach"]
+    exam_sessions = [item for item in sessions if item["kind"] == "exam"]
+    return {
+        "weeks": max((item["week"] for item in sessions), default=0),
+        "teaching_total": len(teaching),
+        "teaching_done": sum(1 for item in teaching if journey_session_done(item, completed, exams)),
+        "exams_total": len(exam_sessions),
+        "exams_done": sum(1 for item in exam_sessions if journey_session_done(item, completed, exams)),
+        "chunks_total": sum(len(item["chunks"]) for item in teaching),
+        "chunks_done": sum(
+            1 for item in teaching for key in item["chunks"] if key in completed
+        ),
+    }
+
+
+def journey_chunk_payload(
+    keys: List[str], plan: Dict[str, Any], completed: set
+) -> List[Dict[str, Any]]:
+    chunk_map = {chunk["key"]: chunk for chunk in plan["chunks"]}
+    rows = []
+    for key in keys:
+        chunk = chunk_map.get(key)
+        if not chunk:
+            continue
+        path = Path(chunk["path"])
+        rows.append(
+            {
+                "key": key,
+                "title": chunk["title"],
+                "topic": chunk["topic_id"],
+                "topic_title": chunk["topic_title"],
+                "path": chunk["path"],
+                "exists": path.is_file(),
+                "done": key in completed,
+            }
+        )
+    return rows
+
+
+def session_payload(
+    session: Dict[str, Any], plan: Dict[str, Any], completed: set, today: date
+) -> Dict[str, Any]:
+    planned = date.fromisoformat(session["date"])
+    payload: Dict[str, Any] = {
+        "id": session["id"],
+        "kind": session["kind"],
+        "week": session["week"],
+        "date": session["date"],
+        "weekday": session["weekday"],
+        "late_days": max(0, (today - planned).days),
+        "overdue": planned < today,
+        "scheduled_today": planned == today,
+    }
+    if session["kind"] == "teach":
+        payload["day"] = session["day"]
+        payload["chunks"] = journey_chunk_payload(session["chunks"], plan, completed)
+        payload["chunk_count"] = len(payload["chunks"])
+        topics: List[str] = []
+        for chunk in payload["chunks"]:
+            if chunk["topic_title"] not in topics:
+                topics.append(chunk["topic_title"])
+        payload["topics"] = topics
+    else:
+        payload["chunks"] = journey_chunk_payload(session["chunks"], plan, completed)
+        payload["chunk_count"] = len(payload["chunks"])
+        payload["topics"] = session["topics"]
+        payload["question_count"] = session["question_count"]
+        payload["types"] = session["types"]
+        payload["scope"] = session["scope"]
+    return payload
 
 
 def pick_focus(ws: Path, state: Dict[str, Any], subject: str) -> Dict[str, Any]:
@@ -1746,6 +2171,26 @@ def cmd_teach(args, ctx: Ctx) -> int:
     upcoming = next_plan_chunk(plan, completed)
     save_state(ctx.ws, state)
     render_roadmap_md(ctx.ws, state, subject, plan)
+    journey_config = state.get("journey", {}).get(subject)
+    journey_day = None
+    if journey_config:
+        render_journey_md(ctx.ws, state, subject, plan, journey_config)
+        exams = journey_config.get("exams") or {}
+        wrapped_ids = set(journey_config.get("wrapped") or [])
+        for session in build_journey_sessions(plan, journey_config):
+            if session["kind"] != "teach" or chunk["key"] not in session["chunks"]:
+                continue
+            if journey_session_done(session, completed, exams):
+                is_wrapped = session["id"] in wrapped_ids
+                journey_day = {
+                    "id": session["id"],
+                    "date": session["date"],
+                    "wrapped": is_wrapped,
+                    "action": None
+                    if is_wrapped
+                    else f"journey wrap --subject {subject}",
+                }
+            break
 
     payload = {
         "ok": True,
@@ -1774,6 +2219,8 @@ def cmd_teach(args, ctx: Ctx) -> int:
         if weak_record is None
         else {"topic": topic, "status": weak_record.get("status"), "misses": weak_record.get("misses")},
     }
+    if journey_day:
+        payload["journey_day"] = journey_day
 
     where = f"{label} / {chunk['topic_title']} / {chunk['title']}"
     if weak_record:
@@ -1786,6 +2233,8 @@ def cmd_teach(args, ctx: Ctx) -> int:
                          f"({counts['topics_done']}/{counts['topics_total']} topics)")
         lines.append(f"course progress: {counts['chunks_done']}/{counts['chunks_total']} chunks, "
                      f"{counts['topics_done']}/{counts['topics_total']} topics")
+        if journey_day and journey_day.get("action"):
+            lines.append("end of day: call journey wrap for assignments and the lab task")
         if upcoming is not None:
             lines.append(
                 f"next: {upcoming['topic_title']} — chunk {upcoming['index_in_topic']}/{upcoming['chunk_total']} "
@@ -1794,6 +2243,516 @@ def cmd_teach(args, ctx: Ctx) -> int:
     else:
         lines = [f"teach check passed: {where} — pass --complete when the chunk is mastered"]
     return emit(ctx, payload, "\n".join(lines))
+
+
+# --------------------------------------------------------------------------- #
+# journey
+# --------------------------------------------------------------------------- #
+
+
+def journey_settings(config: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "start": config.get("start"),
+        "chunks_per_day": int(config.get("chunks_per_day", 2) or 2),
+        "exam_types": list(config.get("exam_types") or ["mcq"]),
+        "exam_questions": int(config.get("exam_questions", 8) or 8),
+        "exam_scope": config.get("exam_scope", "week"),
+        "labs": config.get("labs", "auto"),
+        "exams_done": len(config.get("exams") or {}),
+    }
+
+
+def next_open_after(
+    sessions: List[Dict[str, Any]],
+    target: Optional[Dict[str, Any]],
+    completed: set,
+    exams: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if target is None:
+        return None
+    start = sessions.index(target) + 1
+    for session in sessions[start:]:
+        if not journey_session_done(session, completed, exams):
+            return session
+    return None
+
+
+def cmd_journey(args, ctx: Ctx) -> int:
+    state = load_state(ctx.ws)
+    if not state_path(ctx.ws).is_file():
+        return fail(ctx, f"no practice-loop workspace at {ctx.ws}; run init first", code=3)
+
+    chosen = getattr(args, "subject", None) or current_subject(state)
+    if not chosen:
+        return fail(ctx, "no subjects in the rotation; add one with: add-subject <name>", code=4)
+    subject = slugify(chosen)
+    label = subject_label(state, subject)
+    plan, errors = load_roadmap(ctx.ws, subject)
+    if plan is None or errors:
+        return teach_blocked(ctx, subject, label, plan, errors)
+
+    today = date.today()
+    preview = getattr(args, "today", None)
+    if preview:
+        try:
+            today = date.fromisoformat(str(preview))
+        except ValueError:
+            return fail(ctx, "--today must be YYYY-MM-DD", code=2)
+
+    action = getattr(args, "action", None)
+    journeys = state.setdefault("journey", {})
+    config = journeys.get(subject)
+
+    if action == "plan":
+        try:
+            start = parse_journey_start(getattr(args, "start", None), today)
+        except ValueError as exc:
+            return fail(ctx, str(exc), code=2)
+
+        existing = config or {}
+        per_day = getattr(args, "chunks_per_day", None)
+        if per_day is None:
+            per_day = existing.get("chunks_per_day", 2)
+        if not 1 <= int(per_day) <= 6:
+            return fail(ctx, "--chunks-per-day must be between 1 and 6", code=2)
+
+        raw_types = getattr(args, "exam_types", None)
+        if raw_types:
+            exam_types = [item.strip() for item in str(raw_types).split(",") if item.strip()]
+        else:
+            exam_types = existing.get("exam_types") or [
+                item for item in state["config"].get("types", []) if item in JOURNEY_TYPES
+            ] or ["mcq", "exercise"]
+        bad = [item for item in exam_types if item not in JOURNEY_TYPES]
+        if bad or not exam_types:
+            return fail(
+                ctx,
+                f"unknown exam type(s): {', '.join(bad) or '(none)'}; allowed: {', '.join(JOURNEY_TYPES)}",
+                code=2,
+            )
+
+        questions = getattr(args, "exam_questions", None)
+        if questions is None:
+            questions = existing.get("exam_questions", 8)
+        if not 1 <= int(questions) <= 30:
+            return fail(ctx, "--exam-questions must be between 1 and 30", code=2)
+
+        scope = getattr(args, "exam_scope", None) or existing.get("exam_scope", "week")
+        if scope not in ("week", "course"):
+            return fail(ctx, "--exam-scope must be week or course", code=2)
+
+        labs_mode = getattr(args, "labs", None) or existing.get("labs", "auto")
+        if labs_mode not in ("auto", "on", "off"):
+            return fail(ctx, "--labs must be auto, on, or off", code=2)
+
+        had_exams = bool(existing.get("exams"))
+        config = {
+            "start": start.isoformat(),
+            "chunks_per_day": int(per_day),
+            "exam_types": exam_types,
+            "exam_questions": int(questions),
+            "exam_scope": scope,
+            "labs": labs_mode,
+            "created_at": now_iso(),
+            "exams": {},
+            "wrapped": [],
+        }
+        journeys[subject] = config
+        save_state(ctx.ws, state)
+        sessions = build_journey_sessions(plan, config)
+        completed = set(teach_progress(state, subject)["completed"])
+        counts = journey_counts(sessions, completed, {})
+        first = sessions[0] if sessions else None
+        outline = render_journey_md(ctx.ws, state, subject, plan, config)
+        lab_enabled = labs_mode == "on" or (
+            labs_mode == "auto" and course_is_practical(plan, subject)
+        )
+        lab_kind = lab_kind_for(plan, subject) if lab_enabled else None
+        payload = {
+            "ok": True,
+            "action": "plan",
+            "subject": subject,
+            "subject_label": label,
+            "journey": journey_settings(config),
+            "outline": outline,
+            "labs": {"mode": labs_mode, "enabled": lab_enabled, "kind": lab_kind},
+            "counts": counts,
+            "exams_reset": had_exams,
+            "first": session_payload(first, plan, completed, today) if first else None,
+            "sessions": [
+                {
+                    "id": item["id"],
+                    "kind": item["kind"],
+                    "week": item["week"],
+                    "date": item["date"],
+                    "weekday": item["weekday"],
+                    "chunks": len(item["chunks"]),
+                    **({"day": item["day"]} if item["kind"] == "teach" else {"topics": item["topics"]}),
+                }
+                for item in sessions
+            ],
+        }
+        lines = [
+            f"journey planned: {label} — {count_label(counts['weeks'], 'week')}, "
+            f"{count_label(counts['teaching_total'], 'teaching day')}, "
+            f"{count_label(counts['exams_total'], 'exam')}",
+            f"start: {config['start']} ({WEEKDAY_NAMES[start.weekday()]})  "
+            f"pace: {config['chunks_per_day']} chunks/day",
+            f"exam: {config['exam_questions']} questions, {', '.join(config['exam_types'])}, "
+            f"{config['exam_scope']} scope",
+            "labs: "
+            + ("off (theory-only course)" if not lab_enabled else lab_kind),
+            f"outline: {outline}",
+        ]
+        if had_exams:
+            lines.append("exam history was reset by this plan")
+        if first:
+            lines.append(
+                f"first: {first['weekday']} {first['date']} — "
+                f"{len(first['chunks'])} chunks"
+            )
+            lines.append(f"open: journey --subject {subject}")
+        return emit(ctx, payload, "\n".join(lines))
+
+    if action == "wrap":
+        if config is None:
+            return fail(ctx, "no journey plan for this subject; run journey first", code=12)
+        sessions = build_journey_sessions(plan, config)
+        completed = set(teach_progress(state, subject)["completed"])
+        exams = config.setdefault("exams", {})
+        done_sessions = [
+            session
+            for session in sessions
+            if session["kind"] == "teach" and journey_session_done(session, completed, exams)
+        ]
+        if not done_sessions:
+            return fail(
+                ctx,
+                "no teaching day is complete yet; finish today's chunks before asking for assignments",
+                code=12,
+            )
+        wrapped = config.setdefault("wrapped", [])
+        unwrapped = [session for session in done_sessions if session["id"] not in wrapped]
+        repeat = not unwrapped
+        session = unwrapped[0] if unwrapped else done_sessions[-1]
+        if not repeat:
+            wrapped.append(session["id"])
+            save_state(ctx.ws, state)
+        assignments, lab = assignments_payload(session, plan, config, subject)
+        outline = render_journey_md(ctx.ws, state, subject, plan, config)
+        payload = {
+            "ok": True,
+            "action": "wrap",
+            "subject": subject,
+            "subject_label": label,
+            "repeat": repeat,
+            "session": session_payload(session, plan, completed, today),
+            "assignments": assignments,
+            "lab": lab,
+            "outline": outline,
+        }
+        lines = [
+            f"end of day: {label} — week {session['week']} · lesson {session['day']} "
+            f"({session['weekday']} {session['date']})"
+        ]
+        if repeat:
+            lines.append("assignments were already shown for this day; here they are again")
+        lines.append(f"assignments ({assignments['count']}):")
+        for index, item in enumerate(assignments["items"], 1):
+            lines.append(f"  {index}. [{item['kind']}] {item['brief']}")
+        lines.append(f"  submit: {assignments['submit']}")
+        if lab["required"]:
+            lines.append(f"lab ({lab['kind']}): {lab['brief']}")
+            lines.append(f"  submit: {lab['submit']}")
+        else:
+            lines.append(f"lab: none — {lab['reason']}")
+        lines.append(f"outline: {outline}")
+        return emit(ctx, payload, "\n".join(lines))
+
+    if action == "exam-done":
+        if config is None:
+            return fail(ctx, "no journey plan for this subject; run journey plan first", code=12)
+        sessions = build_journey_sessions(plan, config)
+        completed = set(teach_progress(state, subject)["completed"])
+        exams = config.setdefault("exams", {})
+        target = first_open_session(sessions, completed, exams)
+        if target is None:
+            return fail(ctx, "the journey is already complete; nothing to record", code=12)
+        if target["kind"] != "exam":
+            return fail(
+                ctx,
+                f"the next journey session is teaching, not an exam: {target['date']} "
+                f"({len(target['chunks'])} chunks)",
+                code=12,
+            )
+        exams[str(target["week"])] = {
+            "completed_at": now_iso(),
+            "date": today.isoformat(),
+            "score": trim(getattr(args, "score", None), 200),
+            "notes": trim(getattr(args, "notes", None), 2000),
+        }
+        save_state(ctx.ws, state)
+        counts = journey_counts(sessions, completed, exams)
+        upcoming = next_open_after(sessions, target, completed, exams)
+        outline = render_journey_md(ctx.ws, state, subject, plan, config)
+        payload = {
+            "ok": True,
+            "action": "exam-done",
+            "outline": outline,
+            "subject": subject,
+            "subject_label": label,
+            "exam": {
+                "week": target["week"],
+                "date": target["date"],
+                "score": exams[str(target["week"])]["score"],
+                "types": target["types"],
+                "question_count": target["question_count"],
+            },
+            "counts": counts,
+            "next": session_payload(upcoming, plan, completed, today) if upcoming else None,
+        }
+        lines = [
+            f"exam recorded: {label} week {target['week']} — "
+            f"{exams[str(target['week'])]['score'] or 'no score given'}"
+        ]
+        lines.append(
+            f"journey: {counts['teaching_done']}/{counts['teaching_total']} teaching days, "
+            f"{counts['exams_done']}/{counts['exams_total']} exams"
+        )
+        if upcoming is None:
+            lines.append("course complete — use weak/report to keep it warm")
+        else:
+            lines.append(
+                f"next: {upcoming['weekday']} {upcoming['date']} — {upcoming['kind']}"
+            )
+        return emit(ctx, payload, "\n".join(lines))
+
+    # default action: today's status
+    created = False
+    if config is None:
+        config = default_journey_config(state, today)
+        journeys[subject] = config
+        save_state(ctx.ws, state)
+        created = True
+
+    sessions = build_journey_sessions(plan, config)
+    completed = set(teach_progress(state, subject)["completed"])
+    exams = config.setdefault("exams", {})
+    counts = journey_counts(sessions, completed, exams)
+    outline = render_journey_md(ctx.ws, state, subject, plan, config)
+    target = first_open_session(sessions, completed, exams)
+    pending = state.get("pending")
+
+    if target is None:
+        payload = {
+            "ok": True,
+            "action": "status",
+            "status": "complete",
+            "subject": subject,
+            "subject_label": label,
+            "today": today.isoformat(),
+            "weekday": WEEKDAY_NAMES[today.weekday()],
+            "journey": journey_settings(config),
+            "counts": counts,
+            "outline": outline,
+            "session": None,
+            "next": None,
+        }
+        return emit(
+            ctx,
+            payload,
+            f"journey complete: {label} — every teaching day and exam is done\noutline: {outline}",
+        )
+
+    first_date = date.fromisoformat(sessions[0]["date"]) if sessions else today
+    planned = date.fromisoformat(target["date"])
+    overdue = planned < today
+    weekend = today.weekday() >= 5
+
+    if today < first_date:
+        status = "before_start"
+    elif target["kind"] == "teach" and weekend and not overdue:
+        status = "rest"
+    elif planned > today:
+        status = "ahead"
+    else:
+        status = target["kind"]
+
+    upcoming = next_open_after(sessions, target, completed, exams)
+    payload = {
+        "ok": True,
+        "action": "status",
+        "status": status,
+        "subject": subject,
+        "subject_label": label,
+        "today": today.isoformat(),
+        "weekday": WEEKDAY_NAMES[today.weekday()],
+        "journey": journey_settings(config),
+        "counts": counts,
+        "outline": outline,
+        "session": session_payload(target, plan, completed, today),
+        "next": session_payload(upcoming, plan, completed, today) if upcoming else None,
+        "created": created,
+    }
+    if pending is not None:
+        payload["pending_open"] = True
+        if status == "exam":
+            payload["blocked_by_pending"] = True
+
+    session = payload["session"]
+    lines = [f"journey: {label} — week {session['week']} · {session['weekday']} {session['date']}"]
+    if session["overdue"]:
+        lines.append(f"late by {session['late_days']} day(s) — catch up from here")
+    if status == "before_start":
+        lines.append(f"the journey starts {session['weekday']} {session['date']}; come back then")
+    elif status == "rest":
+        lines.append("rest day — no lesson scheduled today")
+        lines.append(f"next: {session['weekday']} {session['date']} — {session['kind']}")
+    elif status == "ahead":
+        lines.append("you are ahead of the calendar")
+        lines.append(f"next: {session['weekday']} {session['date']} — {session['kind']}")
+    elif status == "teach":
+        lines.append(
+            f"teach day {session.get('day', '?')}/4 · {session['chunk_count']} chunks · "
+            f"{', '.join(session['topics'])}"
+        )
+        for index, chunk in enumerate(session["chunks"], 1):
+            mark = "done" if chunk["done"] else ("missing" if not chunk["exists"] else "ready")
+            lines.append(f"  {index}. {chunk['topic_title']} / {chunk['title']} [{mark}]")
+        lines.append("teach these chunks with teach next, then stop; journey advances by itself")
+    elif status == "exam":
+        lines.append(
+            f"exam day · week {session['week']} · {session['question_count']} questions · "
+            f"{', '.join(session['types'])} · {session['scope']} scope"
+        )
+        lines.append(f"topics: {', '.join(session['topics'])}")
+        lines.append(
+            f"ask one question at a time, record each with record --subject {subject} "
+            f"--topic <concept>, then journey exam-done --score <n>/<m>"
+        )
+    lines.append(
+        f"progress: {counts['teaching_done']}/{counts['teaching_total']} teaching days, "
+        f"{counts['exams_done']}/{counts['exams_total']} exams"
+    )
+    lines.append(f"outline: {outline}")
+    if pending is not None:
+        lines.append("note: a main-flow question is still pending; resolve it before an exam")
+    return emit(ctx, payload, "\n".join(lines))
+
+
+def cmd_topics(args, ctx: Ctx) -> int:
+    state = load_state(ctx.ws)
+    if not state_path(ctx.ws).is_file():
+        return fail(ctx, f"no practice-loop workspace at {ctx.ws}; run init first", code=3)
+    if args.subject:
+        subjects = [slugify(args.subject)]
+    else:
+        subjects = list(state["rotation"]["subjects"])
+    if not subjects:
+        return fail(ctx, "no subjects in the rotation; add one with: add-subject <name>", code=4)
+
+    rows = []
+    for subject in subjects:
+        plan, errors = load_roadmap(ctx.ws, subject)
+        row: Dict[str, Any] = {
+            "subject": subject,
+            "subject_label": subject_label(state, subject),
+            "ready": plan is not None and not errors,
+            "errors": errors,
+        }
+        if state.get("journey", {}).get(subject):
+            row["outline"] = str(journey_outline_path(ctx.ws, subject))
+        if row["ready"]:
+            completed = set(teach_progress(state, subject)["completed"])
+            counts, topics = plan_summary(plan, completed)
+            row["counts"] = counts
+            row["topics"] = topics
+            row["plan"] = plan["path"]
+            row["markdown"] = plan["markdown"]
+        rows.append(row)
+
+    payload = {
+        "ok": True,
+        "current": current_subject(state),
+        "subjects": rows,
+        "show_chunks": bool(args.chunks),
+    }
+    lines = []
+    for row in rows:
+        if not row["ready"]:
+            lines.append(f"{row['subject_label']}: no roadmap yet")
+            if row["errors"]:
+                lines.extend(f"  - {item}" for item in row["errors"])
+            continue
+        counts = row["counts"]
+        lines.append(
+            f"{row['subject_label']} — {counts['chunks_done']}/{counts['chunks_total']} chunks · "
+            f"{counts['topics_done']}/{counts['topics_total']} topics"
+        )
+        for topic in row["topics"]:
+            done = sum(1 for chunk in topic["chunks"] if chunk["done"])
+            lines.append(f"  {topic['index']}. {topic['title']} ({done}/{len(topic['chunks'])})")
+            if args.chunks:
+                for chunk in topic["chunks"]:
+                    mark = "x" if chunk["done"] else " "
+                    lines.append(f"     [{mark}] {chunk['index']}. {chunk['title']}")
+        lines.append(f"  roadmap: {row['markdown']}")
+        if row.get("outline"):
+            lines.append(f"  journey: {row['outline']}")
+    return emit(ctx, payload, "\n".join(lines))
+
+
+def cmd_quick_teach(args, ctx: Ctx) -> int:
+    state = load_state(ctx.ws)
+    if not state_path(ctx.ws).is_file():
+        return fail(ctx, f"no practice-loop workspace at {ctx.ws}; run init first", code=3)
+    topic = str(args.topic).strip()
+    if not topic:
+        return fail(ctx, "quick-teach needs a topic name", code=2)
+
+    subjects = list(state["rotation"]["subjects"])
+    preferred = slugify(args.subject) if args.subject else current_subject(state)
+    ordered = ([preferred] if preferred else []) + [s for s in subjects if s != preferred]
+
+    matches = []
+    for subject in ordered:
+        plan, errors = load_roadmap(ctx.ws, subject)
+        if plan is None or errors:
+            continue
+        if match_topic(plan, topic):
+            matches.append(subject)
+
+    if not matches:
+        return fail(
+            ctx,
+            f"no topic '{topic}' in any course roadmap; run list-topics to see what exists",
+            code=11,
+        )
+    if args.subject:
+        subject = slugify(args.subject)
+        plan, errors = load_roadmap(ctx.ws, subject)
+        if plan is None or errors:
+            return teach_blocked(ctx, subject, subject_label(state, subject), plan, errors)
+        if not match_topic(plan, topic):
+            return fail(
+                ctx,
+                f"no topic '{topic}' in {subject_label(state, subject)}; run list-topics --subject {subject}",
+                code=11,
+            )
+    elif preferred in matches:
+        subject = preferred
+    elif len(matches) == 1:
+        subject = matches[0]
+    else:
+        return fail(
+            ctx,
+            f"topic '{topic}' exists in several courses; pass --subject",
+            code=11,
+            subjects=[subject_label(state, item) for item in matches],
+        )
+
+    forwarded = argparse.Namespace(action="next", subject=subject, topic=topic)
+    return cmd_teach(forwarded, ctx)
 
 
 # --------------------------------------------------------------------------- #
@@ -2044,6 +3003,40 @@ def build_parser() -> argparse.ArgumentParser:
     teach_record.add_argument("--retest")
     teach_record.add_argument("--complete", action="store_true", help="mark the chunk complete")
     teach_record.set_defaults(func=cmd_teach)
+
+    journey = sub.add_parser("journey", help="weekly journey: Mon-Thu lessons, Friday exam")
+    journey.add_argument("--subject")
+    journey.add_argument("--today", help="preview a date as YYYY-MM-DD")
+    journey_sub = journey.add_subparsers(dest="action")
+    journey_plan = journey_sub.add_parser("plan", help="divide the roadmap into weeks and days")
+    journey_plan.add_argument("--subject")
+    journey_plan.add_argument("--start", help="today, next-monday, or YYYY-MM-DD")
+    journey_plan.add_argument("--chunks-per-day", type=int)
+    journey_plan.add_argument("--exam-types", help="mcq,exercise,conceptual")
+    journey_plan.add_argument("--exam-questions", type=int)
+    journey_plan.add_argument("--exam-scope", choices=["week", "course"])
+    journey_plan.add_argument("--labs", choices=["auto", "on", "off"])
+    journey_plan.set_defaults(func=cmd_journey)
+    journey_wrap = journey_sub.add_parser("wrap", help="end-of-day assignments and lab")
+    journey_wrap.add_argument("--subject")
+    journey_wrap.add_argument("--today")
+    journey_wrap.set_defaults(func=cmd_journey)
+    journey_exam = journey_sub.add_parser("exam-done", help="record the current Friday exam")
+    journey_exam.add_argument("--subject")
+    journey_exam.add_argument("--score")
+    journey_exam.add_argument("--notes")
+    journey_exam.set_defaults(func=cmd_journey)
+    journey.set_defaults(func=cmd_journey)
+
+    topics = sub.add_parser("topics", aliases=["list-topics"], help="list course roadmaps and topics")
+    topics.add_argument("--subject")
+    topics.add_argument("--chunks", action="store_true", help="show every chunk")
+    topics.set_defaults(func=cmd_topics)
+
+    quick = sub.add_parser("quick-teach", help="start teaching one topic directly")
+    quick.add_argument("topic")
+    quick.add_argument("--subject")
+    quick.set_defaults(func=cmd_quick_teach)
 
     set_cmd = sub.add_parser("set", help="change difficulty, types, mastery streak, or subjects")
     set_cmd.add_argument("--difficulty")

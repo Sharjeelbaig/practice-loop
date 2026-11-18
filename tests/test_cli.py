@@ -329,6 +329,194 @@ class PracticeLoopTest(unittest.TestCase):
         joins = self.run_cli("teach", "next", "--subject", "sql", "--topic", "Joins")
         self.assertEqual(joins["chunk"], "joins/left-join-nulls.md")
 
+    def complete_all_chunks(self, subject="sql"):
+        for _ in range(50):
+            brief = self.run_cli("teach", "next", "--subject", subject)
+            if brief.get("done") or not brief.get("ok", True):
+                return
+            self.run_cli(
+                "teach", "record", "--subject", subject, "--result", "correct", "--complete"
+            )
+        self.fail("teach next never finished")
+
+    def test_journey_plan_splits_weeks_into_days_and_friday_exam(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        planned = self.run_cli(
+            "journey", "plan", "--subject", "sql", "--start", "2026-11-23",
+            "--chunks-per-day", "2", "--exam-types", "mcq", "--exam-questions", "4",
+        )
+        self.assertEqual(planned["counts"]["teaching_total"], 2)
+        self.assertEqual(planned["counts"]["exams_total"], 1)
+        self.assertEqual(planned["first"]["date"], "2026-11-23")
+        outline_path = self.ws / "topics" / "sql" / "JOURNEY.md"
+        self.assertTrue(outline_path.is_file())
+        outline = outline_path.read_text(encoding="utf-8")
+        self.assertIn("### Mon 23 Nov · Lesson 1 — Joins [ ]", outline)
+        self.assertIn("- [ ] Joins / Row preservation", outline)
+        self.assertIn("### Fri 27 Nov · Week 1 exam", outline)
+
+        monday = self.run_cli("journey", "--subject", "sql", "--today", "2026-11-23")
+        self.assertEqual(monday["status"], "teach")
+        self.assertEqual(monday["session"]["week"], 1)
+        self.assertEqual(monday["session"]["day"], 1)
+        self.assertEqual(len(monday["session"]["chunks"]), 2)
+
+        self.complete_all_chunks()
+        self.assertIn(
+            "- [x] Joins / Row preservation",
+            outline_path.read_text(encoding="utf-8"),
+            "teach record refreshes the journey outline",
+        )
+
+        thursday = self.run_cli("journey", "--subject", "sql", "--today", "2026-11-26")
+        self.assertEqual(thursday["status"], "ahead")
+        self.assertEqual(thursday["session"]["kind"], "exam")
+        self.assertEqual(thursday["session"]["date"], "2026-11-27")
+        checked = outline_path.read_text(encoding="utf-8")
+        self.assertIn("- [x] Joins / Row preservation", checked)
+        self.assertIn("### Mon 23 Nov · Lesson 1 — Joins [x]", checked)
+
+        friday = self.run_cli("journey", "--subject", "sql", "--today", "2026-11-27")
+        self.assertEqual(friday["status"], "exam")
+        self.assertEqual(friday["session"]["types"], ["mcq"])
+        self.assertEqual(friday["session"]["question_count"], 4)
+        self.assertEqual(len(friday["session"]["topics"]), 2)
+
+        done = self.run_cli(
+            "journey", "exam-done", "--subject", "sql", "--score", "3/4"
+        )
+        self.assertEqual(done["counts"]["exams_done"], 1)
+        self.assertEqual(done["exam"]["score"], "3/4")
+        final_outline = outline_path.read_text(encoding="utf-8")
+        self.assertIn("### Fri 27 Nov · Week 1 exam", final_outline)
+        self.assertIn("[x]", final_outline)
+        self.assertIn("Result: 3/4", final_outline)
+        finished = self.run_cli("journey", "--subject", "sql", "--today", "2026-11-30")
+        self.assertEqual(finished["status"], "complete")
+
+    def test_journey_catches_up_instead_of_skipping_missed_days(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        self.run_cli(
+            "journey", "plan", "--subject", "sql", "--start", "2026-11-23",
+            "--chunks-per-day", "2",
+        )
+        tuesday = self.run_cli("journey", "--subject", "sql", "--today", "2026-11-24")
+        self.assertEqual(tuesday["status"], "teach")
+        self.assertEqual(tuesday["session"]["day"], 1)
+        self.assertEqual(tuesday["session"]["late_days"], 1)
+
+        saturday = self.run_cli("journey", "--subject", "sql", "--today", "2026-11-28")
+        self.assertEqual(saturday["status"], "teach", "overdue weekends are catch-up days")
+
+        early = self.run_cli("journey", "--subject", "sql", "--today", "2026-11-18")
+        self.assertEqual(early["status"], "before_start")
+
+    def test_journey_requires_a_roadmap_and_auto_plans(self):
+        self.init("--subjects", "sql")
+        blocked = self.run_cli("journey", "--subject", "sql")
+        self.assertEqual(blocked["reason"], "no_plan")
+
+        self.make_roadmap()
+        first = self.run_cli("journey", "--subject", "sql", "--today", "2026-11-23")
+        self.assertTrue(first["created"])
+        self.assertIn(first["status"], ("teach", "ahead"))
+        state = json.loads((self.ws / ".practice-loop" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["journey"]["sql"]["chunks_per_day"], 2)
+
+    def test_journey_exam_done_refuses_before_the_exam_is_open(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        self.run_cli("journey", "plan", "--subject", "sql", "--start", "2026-11-23")
+        refused = self.run_cli(
+            "journey", "exam-done", "--subject", "sql", "--score", "1/1", expect=12
+        )
+        self.assertFalse(refused["ok"])
+
+    def test_list_topics_and_chunks(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        listed = self.run_cli("list-topics")
+        self.assertEqual(listed["current"], "sql")
+        subject = listed["subjects"][0]
+        self.assertTrue(subject["ready"])
+        self.assertEqual([topic["title"] for topic in subject["topics"]], ["Joins", "Aggregation"])
+        self.assertEqual(subject["counts"]["chunks_total"], 4)
+
+        detailed = self.run_cli("topics", "--chunks")
+        self.assertIn("Row preservation", detailed["subjects"][0]["topics"][0]["chunks"][0]["title"])
+
+    def test_quick_teach_starts_a_named_topic(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        started = self.run_cli("quick-teach", "Aggregation")
+        self.assertEqual(started["topic_title"], "Aggregation")
+        self.assertEqual(started["chunk"], "aggregation/count-nulls.md")
+
+        missing = self.run_cli("quick-teach", "Nope", expect=11)
+        self.assertFalse(missing["ok"])
+
+    def test_journey_wrap_presents_assignments_and_a_lab(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        self.run_cli(
+            "journey", "plan", "--subject", "sql", "--start", "2026-11-23",
+            "--chunks-per-day", "2", "--labs", "auto",
+        )
+        self.run_cli("journey", "wrap", "--subject", "sql", "--today", "2026-11-23", expect=12)
+
+        last = None
+        for _ in range(2):
+            self.run_cli("teach", "next", "--subject", "sql")
+            last = self.run_cli(
+                "teach", "record", "--subject", "sql", "--result", "correct", "--complete"
+            )
+        self.assertEqual(last["journey_day"]["id"], "w1d1")
+        self.assertFalse(last["journey_day"]["wrapped"])
+
+        wrap = self.run_cli("journey", "wrap", "--subject", "sql", "--today", "2026-11-23")
+        self.assertFalse(wrap["repeat"])
+        self.assertEqual(wrap["assignments"]["count"], 2)
+        self.assertEqual(wrap["assignments"]["items"][1]["kind"], "apply")
+        self.assertTrue(wrap["lab"]["required"])
+        self.assertEqual(wrap["lab"]["kind"], "sql")
+        self.assertIn("2026-11-23-lab", wrap["lab"]["submit"])
+
+        again = self.run_cli("journey", "wrap", "--subject", "sql", "--today", "2026-11-23")
+        self.assertTrue(again["repeat"])
+
+    def test_journey_wrap_skips_labs_for_theory_courses(self):
+        self.init("--subjects", "history")
+        self.make_roadmap(
+            subject="history",
+            topics=[
+                {"title": "Ancient empires", "chunks": ["Roman republic", "Han dynasty"]},
+                {"title": "Revolutions", "chunks": ["French revolution", "Industrial revolution"]},
+            ],
+        )
+        planned = self.run_cli(
+            "journey", "plan", "--subject", "history", "--start", "2026-11-23",
+            "--chunks-per-day", "2", "--labs", "auto",
+        )
+        self.assertFalse(planned["labs"]["enabled"])
+        for _ in range(2):
+            self.run_cli("teach", "next", "--subject", "history")
+            self.run_cli(
+                "teach", "record", "--subject", "history", "--result", "correct", "--complete"
+            )
+        wrap = self.run_cli("journey", "wrap", "--subject", "history", "--today", "2026-11-23")
+        self.assertFalse(wrap["lab"]["required"])
+        self.assertEqual(wrap["assignments"]["items"][1]["kind"], "analysis")
+
+    def test_journey_lab_override(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        forced_off = self.run_cli(
+            "journey", "plan", "--subject", "sql", "--start", "2026-11-23", "--labs", "off"
+        )
+        self.assertFalse(forced_off["labs"]["enabled"])
+
     def test_teach_correct_never_clears_weakness(self):
         self.init("--subjects", "sql")
         self.make_roadmap()

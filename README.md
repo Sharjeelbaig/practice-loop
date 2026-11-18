@@ -1,22 +1,26 @@
 # practice-loop
 
-An adaptive practice and teaching loop that any coding agent can run.
+An agent skill that turns any course into a daily class and a Friday exam.
+You bring a topic, a book, a URL, or your notes. The agent plans the whole
+course, teaches one small chunk at a time, quizzes you, and remembers exactly
+what you got wrong.
 
-You bring a topic, a URL, a document, or your own notes. The agent quizzes you
-one question at a time, rotates across subjects in a fixed order, grades what
-you actually wrote, and remembers what you got wrong. It can also teach you the
-material in small chunks — but teaching never counts as proof.
+Works in **OpenCode**, **Claude Code**, **Codex**, and any host that reads
+[agent skills](https://agentskills.io). Progress lives in your folder, so the
+same workspace follows you across agents.
 
-Works in **OpenCode**, **Claude Code**, **Codex**, and any other host that reads
-[agent skills](https://agentskills.io). Progress lives in your workspace, so the
-same folder works across all of them.
+---
 
-```text
-SQL MCQ → C# DSA exercise → OOP MCQ → DBMS conceptual → SQL exercise → …
-```
+## Why it is different
 
-No two questions from the same subject in a row. A failure does not reset the
-rotation. A weakness does not disappear because the agent explained it well.
+- **Course → topics → chunks.** A course is never one topic, and a topic is
+  never one lesson. Every course has a roadmap; every topic has 2–8 chunks.
+- **A weekly journey.** Monday–Thursday are lessons, Friday is the exam. The
+  CLI decides what today is; you just show up.
+- **Weaknesses stick.** Teaching never clears a weakness. A correct answer in
+  practice or on the Friday exam does. Failed concepts come back later.
+- **One question at a time.** No walls of questions, no answer before your
+  attempt, no skipping because a topic felt hard.
 
 ---
 
@@ -25,20 +29,16 @@ rotation. A weakness does not disappear because the agent explained it well.
 macOS / Linux:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Sharjeelbaig/practice-loop/main/install.sh | bash
+```
+
+Or clone it yourself:
+
+```bash
 git clone https://github.com/Sharjeelbaig/practice-loop.git ~/.agents/skills/practice-loop
 mkdir -p ~/.claude/skills/practice-loop
 cp -R ~/.agents/skills/practice-loop/{SKILL.md,references,scripts} ~/.claude/skills/practice-loop/
 ```
-
-Or let the installer do it:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Sharjeelbaig/practice-loop/main/install.sh | bash
-```
-
-The installer clones into `~/.agents/skills/practice-loop` (used by Codex and
-OpenCode) and copies the skill files into `~/.claude/skills/practice-loop` (used
-by Claude Code). Run `./install.sh --link-claude` if you prefer a symlink.
 
 Windows PowerShell:
 
@@ -46,243 +46,245 @@ Windows PowerShell:
 .\install.ps1
 ```
 
-Requirements: **Python 3.9+** (standard library only, no packages) and a host
-with shell access.
+Requires **Python 3.9+** and a host with shell access. Restart the host after
+installing.
 
-| Host | Where it loads | Invoke |
-| --- | --- | --- |
-| OpenCode | `~/.agents/skills`, `~/.config/opencode/skills` | `@practice-loop start` |
-| Claude Code | `~/.claude/skills` | `/practice-loop start` |
-| Codex | `~/.agents/skills` | `$practice-loop start` |
+| Host | Invoke |
+| --- | --- |
+| OpenCode | `@practice-loop journey` |
+| Claude Code | `/practice-loop journey` |
+| Codex | `$practice-loop journey` |
 
-Restart or reload the host after installing. Full matrix:
-[`references/hosts.md`](references/hosts.md).
+The rest of this README uses `@practice-loop`. Substitute your host's prefix.
+It is one skill with subcommands — `journey`, `list-topics`, `quick-teach`, and
+so on — not a set of separate slash commands.
 
 ---
 
-## Quick start
+## Start in 60 seconds
 
 ```bash
-mkdir ~/practice/interview-prep && cd ~/practice/interview-prep
+mkdir -p ~/practice/ai && cd ~/practice/ai
 ```
-
-```text
-# In your agent:
-@practice-loop init
-```
-
-It asks for subjects, difficulty, and assessment types, then creates:
-
-```text
-interview-prep/
-├── notes/        # yours; the agent reads it, never writes it
-├── rough/        # your scratch space for solving exercises
-├── weak/         # topics you missed, taught and retested until cleared
-├── topics/       # each course: ROADMAP.json → topic folders → chunk files
-└── .practice-loop/
-    ├── state.json
-    └── history.jsonl
-```
-
-Then:
-
-```text
-@practice-loop start
-```
-
-The first question arrives immediately. Answer it, get graded, and the next
-subject comes up. Keep going until you say stop.
-
----
-
-## The three flows
-
-### Main flow — `start`
-
-One question at a time, in strict rotation. MCQs, coding exercises, SQL
-exercises, conceptual questions. After every answer:
-
-1. Verdict: correct, partial, or wrong.
-2. Why, in a few lines.
-3. The expected answer or corrected solution.
-4. The exact misconception, saved to `weak/`.
-
-Then the next question. No "would you like another?" — continuous is the
-default.
-
-### Teach flow — `teach`
-
-Teaching is planned as a course, not improvised file by file:
-
-```text
-course → ROADMAP.json → topics → 2–8 chunks per topic → one .md per chunk
-```
-
-Before the first lesson the agent writes a complete roadmap of topics and chunk
-titles, validates it, and shows it to you. `teach` then walks that roadmap one
-chunk at a time: teach one idea, check it, re-teach a different way if needed,
-and close the chunk only when you answer correctly. A topic is never one lesson,
-and a course is never one topic — the CLI rejects both.
-
-Correct answers in the teach flow **never** clear a weakness. Only a correct
-answer in the main flow does. Teaching proves you followed an explanation; the
-main flow proves you can retrieve it cold.
-
-### Weakness drill — "quiz me on my weak topics"
-
-Off-rotation main-flow questions against your recorded weaknesses, ordered by
-miss count. These count as real evidence and can clear a topic without
-disturbing the rotation.
-
----
-
-## Weakness lifecycle
-
-| Event | Result |
-| --- | --- |
-| First wrong answer | New weakness, `weak/<subject>/<topic>.md` |
-| Repeat wrong answers | Miss count rises; three misses harden it |
-| Correct in main flow | Cleared after the required streak |
-| Missed later | Reopens automatically, with a regression count |
-| Correct in teach flow | Never clears |
-
-A first-time weakness clears with one clean answer. A repeatedly failed one
-needs two clean answers in a row. That is deliberate: it stops a lucky guess
-from erasing a real gap.
-
-Files look like this:
-
-```markdown
----
-subject: sql
-topic: joins
-status: weak
-misses: 3
-required_streak: 2
----
-# sql / joins
-
-## Misconceptions
-- Uses COUNT(*) after a LEFT JOIN, so customers with no orders count as 1.
-
-## Notes
-```
-
-`weak/*.md` is rendered from state, but the `## Notes` section is preserved and
-yours to edit.
-
----
-
-## Commands
-
-| Say | Effect |
-| --- | --- |
-| `init` | Create the workspace and configure subjects |
-| `start` | Resume or begin the main flow |
-| `teach` / `teach sql` | Teach a subject chunk by chunk |
-| `status` | Rotation position, session score, pending question |
-| `weak` | Prioritised weaknesses with misconceptions |
-| `report` | Accuracy overall, per subject, this session |
-| `history` | Recent attempts, newest first |
-| `quiz me on my weak topics` | Off-rotation drill |
-| `hint` | A smaller hint; never the answer |
-| `skip` | Skip the slot; nothing is marked weak |
-| `harder` / `easier` | Change difficulty |
-| `change subjects` / `add dbms` | Edit the rotation |
-| `new session` | Reset session counters, keep everything else |
-| `reset` | Wipe progress after explicit confirmation |
-
----
-
-## Example session
 
 ```text
 You:    @practice-loop init
-Agent:  Subjects?  →  [SQL, C# DSA, OOP, DBMS, C# theory]
-        Difficulty? →  [adaptive]
-        Types?     →  [mcq, exercise]
-        Workspace created at ~/practice/interview-prep
-
-You:    @practice-loop start
-Agent:  SQL — intermediate — exercise
-
-        Dialect: PostgreSQL
-        customers(id, name), orders(id, customer_id, total)
-        Return every customer's name and order count, including customers
-        with zero orders. Order by count desc, then name.
-
-You:    SELECT c.name, COUNT(*) FROM customers c
-        LEFT JOIN orders o ON o.customer_id = c.id
-        GROUP BY c.name ORDER BY 2 DESC, 1;
-
-Agent:  Partial. LEFT JOIN is right, but COUNT(*) counts the NULL row that a
-        customer with no orders produces, so they score 1 instead of 0.
-        Expected: COUNT(o.id).
-        Remember: COUNT(column) ignores NULL; COUNT(*) counts rows.
-
-        C# DSA — intermediate — exercise
-        Implement int LongestRun(string s). …
+Agent:  Subjects?          → Generative and Agentic AI Basics
+        Difficulty?       → adaptive
+        Types?            → mcq, exercise
+        Workspace created.
 ```
 
-That partial answer becomes `weak/sql/left-join-count.md` and is retested a few
-questions later, with different tables and numbers.
+Then ask it to plan the course:
+
+```text
+You:    @practice-loop teach
+Agent:  Here is the roadmap: 8 topics, 27 chunks.
+        1. How LLMs generate text (4 chunks)
+        2. Prompting (3 chunks)
+        ...
+        Approve the roadmap?
+```
+
+Once the roadmap looks right, start the journey:
+
+```text
+You:    @practice-loop journey
+Agent:  Week 1 · Thursday
+        Teach: How LLMs generate text — Next-token prediction, Temperature
+        (2 chunks, about 40 minutes)
+```
+
+Come back the next day and type the same thing. That is the whole habit.
 
 ---
 
-## Why this rather than a prompt
+## The weekly journey
 
-A long prompt drifts. This keeps the parts that must not drift in a small state
-machine:
+```text
+Monday     lesson 1
+Tuesday    lesson 2
+Wednesday  lesson 3
+Thursday   lesson 4
+Friday     exam on the week's material
+Saturday   rest
+Sunday     rest
+```
 
-- **One pending question.** The CLI refuses to open a second slot, so the model
-  cannot sprint ahead or lose track of what it asked.
-- **Rotation in state.** Subject selection is not a model judgement, so a bad
-  answer never causes a subject to be dropped.
-- **Teach ≠ mastery.** Enforced by the recorder, not by good intentions.
-- **Execution-verified grading.** For SQL and code, the skill runs the answer in
-  a scratch fixture with a timeout and compares results, not vibes.
-- **Persistent, portable progress.** Plain files in your folder. Commit them,
-  move them, open them in another agent.
+- `@practice-loop journey` works out the date and gives you today's session.
+- Every plan writes `topics/<course>/JOURNEY.md`: the full day-by-day outline
+  with dates, topics, chunks, and checkboxes. Open it whenever you want to see
+  what is coming.
+- Each lesson is a small batch of chunks (default **2 chunks/day**).
+- After the last chunk, the agent gives you **two assignments** and, for
+  practical courses, **one lab task**. SQL, code, maths, and AI courses get a
+  lab; theory courses such as history or law get analysis assignments and no
+  lab. Submit work under `rough/`.
+- Friday's exam defaults to **8 questions**, mixing **MCQ + exercise**, and
+  covers the current week. `--exam-scope course` makes it cumulative.
+- If you fall behind, the CLI serves the missed lesson first. Finish it, run
+  `journey` again, and the Friday exam can still open the same day.
+- If you finish a week early, `journey` tells you when the next session opens.
+  It does not skip ahead.
+- `@practice-loop quick-teach <topic>` is the only way to study off-schedule.
 
-The full behavioural spec is in
-[`SKILL.md`](SKILL.md), with references
-for question design, grading, authoring, state, and host install.
+Customise the plan once:
+
+```text
+@practice-loop journey plan --start next-monday --chunks-per-day 2 \
+  --exam-types mcq,exercise --exam-questions 8 --exam-scope week --labs auto
+```
+
+Re-planning resets exam dates, not your teaching progress.
 
 ---
 
-## Configure
+## Commands that matter
 
-```bash
-python3 ~/.agents/skills/practice-loop/scripts/practice_loop.py set \
-  --difficulty advanced --types mcq,exercise,conceptual --mastery-streak 2 --limit 10
+| Say | What happens |
+| --- | --- |
+| `@practice-loop journey` | Today's lesson or Friday exam, decided by the CLI |
+| `@practice-loop journey wrap` | End-of-day assignments and lab (the agent calls this) |
+| `@practice-loop list-topics` | The roadmap: topics, chunks, and progress |
+| `@practice-loop quick-teach Prompting` | Start one named topic now, off-schedule |
+| `@practice-loop start` | Free practice: rotation quiz across all subjects |
+| `@practice-loop teach` | Plan or continue a course, chunk by chunk |
+| `@practice-loop weak` | What you keep getting wrong, with misconceptions |
+| `@practice-loop report` | Accuracy, per-subject breakdown, exam-ready summary |
+| `@practice-loop hint` | A smaller hint; never the answer |
+| `@practice-loop skip` | Skip the current slot without marking it weak |
+| `@practice-loop stop` | Pause; progress stays exactly where it is |
+
+Useful extras:
+
+```text
+@practice-loop journey plan --start today --chunks-per-day 3
+@practice-loop teach LangChain and LangGraph
+@practice-loop list-topics --chunks
+@practice-loop quick-teach "Retrieval" --subject "Generative and Agentic AI Basics"
 ```
 
-`--difficulty adaptive` adjusts per subject from the last five results.
-`--limit 0` means continuous.
+---
 
-## Update
+## A real example
 
-```bash
-git -C ~/.agents/skills/practice-loop pull --ff-only
+```text
+You:    @practice-loop journey
+Agent:  Week 2 · Monday — Prompting
+        1. Anatomy of a prompt
+        2. Instructions vs examples
+        Teach both, then stop.
+
+        Anatomy of a prompt
+
+        A prompt has four jobs: role, task, constraints, output shape.
+        Which of these is missing from this prompt?
+        ...
+
+You:    [answers]
+
+Agent:  Correct. One check on examples next.
+        ...
+        End of day — assignments:
+        1. Teach-back: explain anatomy of a prompt without notes.
+        2. Apply: rewrite a weak prompt and justify each change.
+        Lab: build a prompt template that handles three input shapes.
+        Submit: rough/generative-and-agentic-ai-basics/2026-11-30-lab/
 ```
 
-Skill updates never touch a workspace.
+Friday:
 
-## Uninstall
+```text
+You:    @practice-loop journey
+Agent:  Exam day · week 2 · 8 questions · mcq, exercise · week scope
+        Topics: Prompting, Grounding and RAG
 
-```bash
-rm -rf ~/.agents/skills/practice-loop ~/.claude/skills/practice-loop
+        Question 1/8 (MCQ)
+        Which failure is fixed by retrieval rather than a better prompt?
+        ...
+
+You:    [answers all eight]
+
+Agent:  Exam recorded: 6/8. Weak: citation-grounding, retrieval-recall.
+        Next week starts Monday.
 ```
 
-## Development
+The exam is graded like real practice: wrong answers become weaknesses, and
+correct answers count as evidence. Teaching alone never clears them.
 
-```bash
-python3 -m unittest discover -s tests -v
+---
+
+## Make it stick
+
+The skill handles the material; the habit is yours.
+
+- **Put it on the calendar.** A recurring 45-minute block Monday–Thursday and a
+  30-minute Friday exam block. Same time, same place. Treat `journey` as the
+  first tab you open, not a decision you make.
+- **One session a day.** Do not binge four lessons on Sunday. Spacing is what
+  makes the Friday exam meaningful.
+- **Close the book on Friday.** Answer from memory first. Only then review the
+  explanations.
+- **Read `weak` before the next lesson.** Five minutes on yesterday's misses is
+  worth more than re-reading a chapter.
+- **Do the wrap-up before you close the laptop.** The two assignments and the
+  lab are 20–30 minutes; they are what make Friday's exam feel easy. Put the
+  files in the `rough/` paths the agent gives you and ask for a review next day.
+- **Keep your own notes in `notes/`.** The agent reads them for grounding and
+  never writes there. Put explanations in your own words after each lesson.
+- **Use `quick-teach` for curiosity, not avoidance.** If a topic from the
+  roadmap is nagging you, learn it now; do not use it to dodge the day's work.
+- **Protect the first 10 minutes.** Phone face down, one tab, one question.
+- **Take rest days.** Saturday and Sunday are rest unless you are catching up.
+  Sleep is part of the study plan.
+- **Review monthly.** `report` shows the trajectory; `weak` shows what still
+  needs a second pass.
+
+A simple reminder setup:
+
+| When | Reminder |
+| --- | --- |
+| Mon–Thu, 19:00 | "Journey — 45 min, phone away" |
+| Friday, 18:00 | "Friday exam — 30 min, closed book" |
+| Sunday, 20:00 | "Check `weak` and `report` for 10 min" |
+
+---
+
+## Where everything lives
+
+```text
+your-course/
+├── notes/                 yours; the agent reads, never writes
+├── rough/                 your scratch work
+├── weak/                  concepts to retest (generated)
+├── topics/<course>/
+│   ├── ROADMAP.json       the plan: topics, chunk titles
+│   ├── ROADMAP.md         the same plan with checkboxes
+│   ├── JOURNEY.md         day-by-day outline: date, topic, chunks, done
+│   └── <topic>/<chunk>.md one lesson per file
+├── .practice-loop/        state, history, journey calendar
+└── HOW-IT-WORKS.md        a short primer
 ```
 
-No dependencies. Tests cover rotation, pending slots, weakness lifecycle,
-teach-flow isolation, adaptive difficulty, reporting, and reset safety.
+`notes/` and `rough/` are never touched by `reset`. `weak/` is generated from
+state; add personal notes only under its `## Notes` section. `ROADMAP.md` and
+`JOURNEY.md` are generated views — edit `ROADMAP.json` and the journey settings,
+not those two files.
 
-## License
+---
 
-MIT
+## More detail
+
+- [`references/authoring.md`](references/authoring.md) — how courses, topics,
+  and chunks are designed.
+- [`references/flows.md`](references/flows.md) — main, teach, journey, and exam
+  state machines.
+- [`references/question-design.md`](references/question-design.md) — question
+  quality and difficulty.
+- [`references/grading.md`](references/grading.md) — grading and partial credit.
+- [`references/state.md`](references/state.md) — every CLI command and the state
+  schema.
+- [`references/hosts.md`](references/hosts.md) — install and invocation details.
+
+MIT licensed. Issues and pull requests:
+[github.com/Sharjeelbaig/practice-loop](https://github.com/Sharjeelbaig/practice-loop).
