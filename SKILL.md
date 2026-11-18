@@ -293,6 +293,10 @@ Act on `status`. Every response includes `outline`: the path to
 topics, chunks, and checkboxes. Mention it when the learner asks what the
 schedule looks like; do not read the whole file aloud.
 
+If the command returns `reason: "no_plan"` or `"invalid_plan"`, the course has
+no valid roadmap yet: run §5.1 first, then call `journey` again. Do not invent a
+schedule from chunk files that are not in a roadmap.
+
 | status | What to do |
 | --- | --- |
 | `teach` | Teach exactly the chunks in `session.chunks`, one at a time, then stop. Do not teach ahead. |
