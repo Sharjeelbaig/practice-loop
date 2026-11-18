@@ -74,6 +74,26 @@ Rules:
   teaching starts, do not rename a title without an id unless the learner
   agrees; a rename makes that chunk look uncovered again.
 
+Then check the whole map: if finishing every chunk would not achieve the course
+outcome, the roadmap is incomplete. Add the missing topics now, before teaching.
+
+### Example: a DSA course is not one topic
+
+A learner asking for "DSA problem solving" needs units like these, each with its
+own chunks (adjust to their level and language):
+
+| Topic | Example chunks |
+| --- | --- |
+| Arrays and strings | traversal, two pointers, sliding window, prefix sums, in-place edits |
+| Hash maps and sets | frequency counting, membership, grouping, deduplication |
+| Sorting and binary search | comparison sorts, custom keys, binary search, search space |
+| Recursion and backtracking | base cases, call tree, subsets, permutations, pruning |
+| Trees and graphs | traversals, BFS/DFS, topological sort, shortest path, union-find, grids |
+| Dynamic programming | state, transition, base cases, 1D, 2D |
+
+A single "DSA" topic with eight chunks is rejected: it hides every one of these
+units and turns the course back into one compressed lesson.
+
 Then validate and render:
 
 ```bash
