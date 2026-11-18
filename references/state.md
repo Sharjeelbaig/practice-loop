@@ -28,7 +28,9 @@ status
 ```
 
 Returns workspace, rotation position, cycle, difficulty, session counters,
-active weak count, teach progress, and the pending slot if one is open.
+active weak count, and per-subject teach progress. A ready course reports
+`chunks_done/chunks_total` and `topics_done/topics_total`; a course with no
+roadmap reports `ready: false`.
 
 ### `next`
 
@@ -53,7 +55,7 @@ Opens exactly one slot and returns a brief. Advances nothing.
   "limit": null,
   "session_remaining": null,
   "weak_in_subject": [{"topic": "joins", "misses": 3, "required_streak": 2}],
-  "teach": {"completed": ["01-select-basics.md"], "current": null},
+  "teach": {"completed": ["select-basics/filtering-rows.md"], "current": null},
   "pending": {"subject": "sql", "focus": {}, "type": "exercise", "difficulty": "intermediate"}
 }
 ```
@@ -110,21 +112,35 @@ mastered topics, and rotation.
 `accuracy_weighted` counts a partial as 0.5. `accuracy_strict` counts only
 correct answers. Both exclude skipped questions from the denominator.
 
-### `teach next` / `teach record`
+### `teach plan` / `teach next` / `teach record`
 
 ```bash
-teach next --subject sql
+teach plan --subject sql
+teach next --subject sql [--topic "Joins"]
 teach record --subject sql --result correct --complete
 teach record --subject sql --result wrong --topic left-join-null \
              --misconception "Thinks LEFT JOIN drops unmatched rows"
 ```
 
-`teach next` returns the first uncompleted `topics/<subject>/*.md` file. If the
-folder is empty it returns `reason: "no_chunks"`; author material first.
+A course is a roadmap of topics, and each topic is 2–8 chunks. The plan lives in
+`topics/<subject>/ROADMAP.json`; `teach plan` validates it and renders
+`ROADMAP.md`.
 
-`teach record` never advances the chunk on `wrong` or `partial`, and never
-clears a weakness on `correct`. Pass `--complete` only when the chunk's checks
-have been passed.
+- `reason: "no_plan"` → write `ROADMAP.json` first.
+- `reason: "invalid_plan"` → `errors` lists what to fix (fewer than 2 topics, a
+  topic with fewer than 2 chunks, duplicates, more than 8 chunks).
+- `reason: "chunk_missing"` → author only the file at `path`, then rerun
+  `teach next`. Teaching never skips an unwritten chunk.
+- `--topic` on `teach next` starts the first incomplete chunk of one topic.
+- `teach record` never advances the chunk on `wrong` or `partial`, and never
+  clears a weakness on `correct`. Pass `--complete` only when the chunk's checks
+  have been passed.
+- The teach chunk key is `<topic-id>/<chunk-file>`, for example
+  `select-basics/filtering-rows.md`. `--chunk` accepts that key, the bare
+  filename, or an absolute path.
+
+`teach record` reports `topic_complete` when that topic's last chunk closes, and
+`next` names the following topic/chunk.
 
 ### `set`
 
@@ -200,6 +216,7 @@ Deletes `state.json`, `history.jsonl`, and the contents of `weak/`. Keeps
 | 7 | No teach chunk in progress |
 | 8 | `reset` without `--yes` |
 | 9 | `--subject` contradicts the pending slot |
+| 11 | `teach next --topic` names no topic in the roadmap |
 
 ## `state.json`
 
@@ -231,7 +248,12 @@ Deletes `state.json`, `history.jsonl`, and the contents of `weak/`. Keeps
   "pending": null,
   "session": {"id": "...", "started_at": "...", "asked": 3, "correct": 2, "partial": 0, "wrong": 1, "skipped": 0},
   "teach": {
-    "sql": {"completed": ["01-select-basics.md"], "current": null, "checks": 7, "attempts": {}}
+    "sql": {
+      "completed": ["select-basics/anatomy-of-a-select.md"],
+      "current": "select-basics/filtering-rows.md",
+      "checks": 7,
+      "attempts": {"select-basics/anatomy-of-a-select.md": {"correct": 2, "partial": 0, "wrong": 0}}
+    }
   },
   "weak": {
     "sql": {
@@ -239,6 +261,7 @@ Deletes `state.json`, `history.jsonl`, and the contents of `weak/`. Keeps
         "status": "weak", "misses": 3, "partials": 1, "hits": 1, "streak": 1,
         "required_streak": 2, "regressions": 0,
         "first_seen": "...", "last_seen": "...", "last_result": "correct",
+        "unit": "Joins",
         "misconceptions": ["Uses COUNT(*) after a LEFT JOIN"],
         "retest": "Give a customer with no orders",
         "mastered_at": null
@@ -250,8 +273,9 @@ Deletes `state.json`, `history.jsonl`, and the contents of `weak/`. Keeps
 
 `history.jsonl` is append-only, one JSON object per attempt: `ts`, `session`,
 `flow` (`main` or `teach`), `subject`, `topic`, `type`, `difficulty`, `result`,
-`retest`, `question`, `answer`, `expected`, `misconception`, `concept`. `report`
-reads it, so deleting it loses reporting even if `state.json` survives.
+`retest`, `question`, `answer`, `expected`, `misconception`, `concept`. Teach
+rows also carry `unit`, `unit_title`, `chunk`, and `chunk_title`. `report` reads
+it, so deleting it loses reporting even if `state.json` survives.
 
 ## Weakness lifecycle
 

@@ -29,6 +29,11 @@ TYPES = ("mcq", "exercise", "conceptual")
 RESULTS = ("correct", "partial", "wrong", "skipped")
 WEIGHT = {"correct": 1.0, "partial": 0.5, "wrong": 0.0, "skipped": None}
 MAX_TEXT = 4000
+ROADMAP_FILE = "ROADMAP.json"
+ROADMAP_MD = "ROADMAP.md"
+ROADMAP_MIN_TOPICS = 2
+ROADMAP_MIN_CHUNKS = 2
+ROADMAP_MAX_CHUNKS = 8
 
 PRIMER = """# practice-loop workspace
 
@@ -39,8 +44,8 @@ and remembers what you get wrong.
 | --- | --- | --- |
 | `notes/` | you | Your own material. The agent reads it, never writes it. |
 | `rough/` | you | Scratch space for solving exercises. The agent may add scaffolds here. |
-| `topics/` | agent | Small teaching chunks, one folder per subject, one `.md` per chunk. |
-| `weak/` | agent | Topics you got wrong. Taught and retested until you clear them. |
+| `topics/` | agent | One folder per subject: a `ROADMAP.json` plan, then one folder per topic, one `.md` per chunk. |
+| `weak/` | agent | Concepts you got wrong. Taught and retested until you clear them. |
 | `.practice-loop/` | agent | Machine state: rotation, pending question, history. Do not hand-edit. |
 
 ## Flows
@@ -48,8 +53,11 @@ and remembers what you get wrong.
 - `start` — main flow. One question at a time, rotating subjects in a fixed
   order, mixing MCQs and exercises. Wrong answers create or strengthen a
   weakness.
-- `teach` — teach flow. The agent writes `topics/<subject>/*.md` chunks, teaches
-  one chunk, checks understanding, and only moves on when you answer correctly.
+- `teach` — teach flow. The agent first writes a complete roadmap of topics,
+  then teaches one chunk at a time inside each topic and checks understanding.
+
+Each course is a roadmap of topics; each topic is several small chunks. One
+topic is never one lesson.
 
 Correct answers in the teach flow never clear a weakness. Only a correct answer
 in the main flow does. Teaching proves you followed an explanation; the main
@@ -319,6 +327,7 @@ def render_weak(ws: Path, subject: str, topic: str, record: Dict[str, Any]) -> N
         "---",
         f"subject: {subject}",
         f"topic: {topic}",
+        *([f"unit: {record.get('unit')}"] if record.get("unit") else []),
         f"status: {status}",
         f"misses: {record.get('misses', 0)}",
         f"partials: {record.get('partials', 0)}",
@@ -457,7 +466,7 @@ def cmd_init(args, ctx: Ctx) -> int:
     subjects: List[str] = []
     labels: Dict[str, str] = {}
     if args.subjects:
-        subjects, labels = apply_subjects(state, str(args.subjects))
+        subjects, _ = apply_subjects(state, str(args.subjects))
     if subjects:
         for slug in subjects:
             ensure_subject(state, slug)
@@ -528,6 +537,29 @@ def cmd_status(args, ctx: Ctx) -> int:
 
     pending = state.get("pending")
     limit = int(state["config"].get("limit", 0) or 0)
+    teach_summary: Dict[str, Any] = {}
+    for sub in subjects:
+        plan, plan_errors = load_roadmap(ctx.ws, sub)
+        progress = teach_progress(state, sub)
+        if plan is None or plan_errors:
+            teach_summary[sub] = {
+                "ready": False,
+                "reason": "no_plan" if plan is None else "invalid_plan",
+                "completed": len(progress["completed"]),
+                "current": progress.get("current"),
+                "chunks_total": 0,
+                "chunks_done": 0,
+                "topics_total": 0,
+                "topics_done": 0,
+            }
+        else:
+            counts = roadmap_counts(plan, set(progress["completed"]))
+            teach_summary[sub] = {
+                "ready": True,
+                "completed": counts["chunks_done"],
+                "current": progress.get("current"),
+                **counts,
+            }
     payload = {
         "ok": True,
         "workspace": str(ctx.ws),
@@ -543,13 +575,7 @@ def cmd_status(args, ctx: Ctx) -> int:
         "pending": pending,
         "session": session,
         "weak_active": weak_total,
-        "teach": {
-            sub: {
-                "completed": len(state.get("teach", {}).get(sub, {}).get("completed", [])),
-                "current": state.get("teach", {}).get(sub, {}).get("current"),
-            }
-            for sub in subjects
-        },
+        "teach": teach_summary,
     }
 
     lines = [f"workspace: {ctx.ws}"]
@@ -578,11 +604,14 @@ def cmd_status(args, ctx: Ctx) -> int:
             f"— record or skip it before asking another"
         )
     if payload["teach"]:
-        bits = [
-            f"{subject_label(state, sub)} {info['completed']} done"
-            for sub, info in payload["teach"].items()
-            if info["completed"]
-        ]
+        bits = []
+        for sub, info in payload["teach"].items():
+            if not info.get("ready"):
+                continue
+            bits.append(
+                f"{subject_label(state, sub)} {info['chunks_done']}/{info['chunks_total']} chunks · "
+                f"{info['topics_done']}/{info['topics_total']} topics"
+            )
         if bits:
             lines.append("teach: " + ", ".join(bits))
     return emit(ctx, payload, "\n".join(lines))
@@ -604,17 +633,266 @@ def chunk_title(path: Path) -> str:
     return path.stem
 
 
-def subject_chunks(ws: Path, subject: str) -> List[Path]:
-    folder = ws / "topics" / slugify(subject)
-    if not folder.is_dir():
-        return []
-    return sorted([p for p in folder.glob("*.md") if p.is_file()], key=lambda p: p.name.lower())
+# --------------------------------------------------------------------------- #
+# roadmap: subject -> topics -> chunks
+# --------------------------------------------------------------------------- #
+
+
+def roadmap_json_path(ws: Path, subject: str) -> Path:
+    return ws / "topics" / slugify(subject) / ROADMAP_FILE
+
+
+def roadmap_md_path(ws: Path, subject: str) -> Path:
+    return ws / "topics" / slugify(subject) / ROADMAP_MD
+
+
+def teach_progress(state: Dict[str, Any], subject: str) -> Dict[str, Any]:
+    progress = state.setdefault("teach", {}).setdefault(
+        slugify(subject), {"completed": [], "current": None, "checks": 0, "attempts": {}}
+    )
+    progress.setdefault("completed", [])
+    progress.setdefault("attempts", {})
+    progress.setdefault("current", None)
+    progress["completed"] = list(dict.fromkeys(str(item) for item in progress["completed"]))
+    return progress
+
+
+def load_roadmap(ws: Path, subject: str) -> "tuple[Optional[Dict[str, Any]], List[str]]":
+    """Read and validate topics/<subject>/ROADMAP.json.
+
+    Returns (plan, errors). The plan is present but incomplete when errors are
+    returned, so callers can still show the agent what is wrong.
+    """
+    subject = slugify(subject)
+    path = roadmap_json_path(ws, subject)
+    rel = f"topics/{subject}/{ROADMAP_FILE}"
+    if not path.is_file():
+        return None, [f"{rel} is missing"]
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, [f"{rel} is not valid JSON: {exc}"]
+    if not isinstance(raw, dict):
+        return None, [f"{rel} must contain a JSON object"]
+
+    errors: List[str] = []
+    raw_topics = raw.get("topics")
+    if not isinstance(raw_topics, list) or not raw_topics:
+        errors.append("topics must be a non-empty array")
+        raw_topics = []
+    if raw_topics and len(raw_topics) < ROADMAP_MIN_TOPICS:
+        errors.append(
+            f"a roadmap needs at least {ROADMAP_MIN_TOPICS} topics; one topic is not a course. "
+            "Split it into its major units."
+        )
+
+    subject_dir = path.parent
+    course_title = str(raw.get("title") or subject).strip()
+    topics: List[Dict[str, Any]] = []
+    all_chunks: List[Dict[str, Any]] = []
+    seen_topics: Dict[str, str] = {}
+
+    for topic_index, item in enumerate(raw_topics, 1):
+        if isinstance(item, str):
+            item = {"title": item}
+        if not isinstance(item, dict):
+            errors.append(f"topic {topic_index} must be an object or a title string")
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            errors.append(f"topic {topic_index} has no title")
+            continue
+        title_slug = slugify(title)
+        if title_slug == subject or title_slug == slugify(course_title):
+            errors.append(
+                f"topic '{title}' just repeats the course name; a topic must be one unit "
+                "inside the course, not the whole course"
+            )
+            continue
+        topic_id = slugify(str(item.get("id") or title))
+        if topic_id in seen_topics:
+            errors.append(f"duplicate topic id '{topic_id}' (also used by '{seen_topics[topic_id]}')")
+            continue
+        seen_topics[topic_id] = title
+        topic_dir = topic_id
+        outcome = str(item.get("outcome") or "").strip()
+
+        raw_chunks = item.get("chunks")
+        if not isinstance(raw_chunks, list) or not raw_chunks:
+            errors.append(f"topic '{title}' needs a non-empty chunks array")
+            raw_chunks = []
+        elif len(raw_chunks) < ROADMAP_MIN_CHUNKS:
+            errors.append(
+                f"topic '{title}' has {len(raw_chunks)} chunk; a topic must have at least "
+                f"{ROADMAP_MIN_CHUNKS} chunks. Split the topic into teachable pieces."
+            )
+        elif len(raw_chunks) > ROADMAP_MAX_CHUNKS:
+            errors.append(
+                f"topic '{title}' has {len(raw_chunks)} chunks; keep topics to at most "
+                f"{ROADMAP_MAX_CHUNKS} chunks and split the topic."
+            )
+
+        chunks: List[Dict[str, Any]] = []
+        seen_chunks: Dict[str, str] = {}
+        for chunk_index, raw_chunk in enumerate(raw_chunks, 1):
+            if isinstance(raw_chunk, str):
+                raw_chunk = {"title": raw_chunk}
+            if not isinstance(raw_chunk, dict):
+                errors.append(f"topic '{title}' chunk {chunk_index} must be an object or a title string")
+                continue
+            chunk_name = str(raw_chunk.get("title") or "").strip()
+            if not chunk_name:
+                errors.append(f"topic '{title}' chunk {chunk_index} has no title")
+                continue
+            chunk_id = slugify(str(raw_chunk.get("id") or chunk_name))
+            if chunk_id in seen_chunks:
+                errors.append(
+                    f"duplicate chunk '{chunk_name}' in topic '{title}' "
+                    f"(also used by '{seen_chunks[chunk_id]}')"
+                )
+                continue
+            seen_chunks[chunk_id] = chunk_name
+            file_name = f"{chunk_id}.md"
+            key = f"{topic_dir}/{file_name}"
+            chunk = {
+                "index": len(all_chunks) + 1,
+                "index_in_topic": chunk_index,
+                "id": chunk_id,
+                "file": file_name,
+                "key": key,
+                "title": chunk_name,
+                "path": str(subject_dir / topic_dir / file_name),
+                "topic_index": topic_index,
+                "topic_id": topic_id,
+                "topic_title": title,
+                "topic_dir": topic_dir,
+                "topic_outcome": outcome,
+            }
+            chunks.append(chunk)
+            all_chunks.append(chunk)
+
+        topics.append(
+            {
+                "index": topic_index,
+                "id": topic_id,
+                "dir": topic_dir,
+                "title": title,
+                "outcome": outcome,
+                "path": str(subject_dir / topic_dir),
+                "chunks": chunks,
+            }
+        )
+
+    plan = {
+        "subject": subject,
+        "title": str(raw.get("title") or "").strip(),
+        "outcome": str(raw.get("outcome") or "").strip(),
+        "path": str(path),
+        "markdown": str(roadmap_md_path(ws, subject)),
+        "subject_dir": str(subject_dir),
+        "topics": topics,
+        "chunks": all_chunks,
+    }
+    return plan, errors
+
+
+def roadmap_counts(plan: Dict[str, Any], completed: set) -> Dict[str, int]:
+    chunks_done = sum(1 for chunk in plan["chunks"] if chunk["key"] in completed)
+    topics_done = sum(
+        1
+        for topic in plan["topics"]
+        if topic["chunks"] and all(chunk["key"] in completed for chunk in topic["chunks"])
+    )
+    return {
+        "chunks_done": chunks_done,
+        "chunks_total": len(plan["chunks"]),
+        "topics_done": topics_done,
+        "topics_total": len(plan["topics"]),
+    }
+
+
+def next_plan_chunk(
+    plan: Dict[str, Any], completed: set, topic_filter: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    for topic in plan["topics"]:
+        if topic_filter is not None and topic["id"] != topic_filter["id"]:
+            continue
+        for chunk in topic["chunks"]:
+            if chunk["key"] not in completed:
+                item = dict(chunk)
+                item["chunk_total"] = len(topic["chunks"])
+                return item
+    return None
+
+
+def match_topic(plan: Dict[str, Any], value: str) -> Optional[Dict[str, Any]]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        position = int(raw)
+        if 1 <= position <= len(plan["topics"]):
+            return plan["topics"][position - 1]
+    wanted = slugify(raw)
+    for topic in plan["topics"]:
+        if wanted in (topic["id"], slugify(topic["dir"]), slugify(topic["title"])):
+            return topic
+    for topic in plan["topics"]:
+        if wanted and wanted in topic["id"]:
+            return topic
+    return None
+
+
+def resolve_chunk(plan: Dict[str, Any], value: str) -> Optional[Dict[str, Any]]:
+    """Resolve a chunk key, filename, or path against the plan."""
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw:
+        return None
+    for chunk in plan["chunks"]:
+        if raw == chunk["key"]:
+            return chunk
+    matches = [
+        chunk
+        for chunk in plan["chunks"]
+        if raw == chunk["file"] or raw.endswith("/" + chunk["key"]) or raw.endswith("/" + chunk["file"])
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def render_roadmap_md(ws: Path, state: Dict[str, Any], subject: str, plan: Dict[str, Any]) -> str:
+    completed = set(teach_progress(state, subject)["completed"])
+    counts = roadmap_counts(plan, completed)
+    title = plan["title"] or subject_label(state, subject)
+    lines = [f"# {title} — Roadmap", ""]
+    if plan["outcome"]:
+        lines += [plan["outcome"], ""]
+    lines.append(
+        f"**Progress:** {counts['chunks_done']}/{counts['chunks_total']} chunks · "
+        f"{counts['topics_done']}/{counts['topics_total']} topics complete"
+    )
+    lines.append("")
+    for topic in plan["topics"]:
+        lines.append(f"## {topic['index']}. {topic['title']}")
+        if topic["outcome"]:
+            lines.append(topic["outcome"])
+        lines.append("")
+        for chunk in topic["chunks"]:
+            box = "x" if chunk["key"] in completed else " "
+            lines.append(f"- [{box}] {chunk['index_in_topic']}. {chunk['title']}")
+        lines.append("")
+    text = "\n".join(lines).rstrip() + "\n"
+    atomic_write(roadmap_md_path(ws, subject), text)
+    return plan["markdown"]
 
 
 def pick_focus(ws: Path, state: Dict[str, Any], subject: str) -> Dict[str, Any]:
     stats = ensure_subject(state, subject)
+    plan, errors = load_roadmap(ws, subject)
+    ready = plan is not None and not errors
     weak = active_weak(state, subject)
-    if weak and (stats["asked"] % 2 == 1 or not subject_chunks(ws, subject)):
+    if weak and (stats["asked"] % 2 == 1 or not ready):
         first = weak[0]
         return {
             "kind": "weak",
@@ -623,10 +901,26 @@ def pick_focus(ws: Path, state: Dict[str, Any], subject: str) -> Dict[str, Any]:
             "last_seen": first.get("last_seen"),
             "retest": True,
         }
-    completed = set(state.get("teach", {}).get(slugify(subject), {}).get("completed", []))
-    for path in subject_chunks(ws, subject):
-        if path.name not in completed:
-            return {"kind": "chunk", "topic": slugify(path.stem), "chunk": path.name, "title": chunk_title(path)}
+    if ready:
+        progress = teach_progress(state, subject)
+        chunk = next_plan_chunk(plan, set(progress["completed"]))
+        if chunk:
+            path = Path(chunk["path"])
+            return {
+                "kind": "chunk",
+                "topic": chunk["topic_id"],
+                "topic_title": chunk["topic_title"],
+                "topic_index": chunk["topic_index"],
+                "topic_total": len(plan["topics"]),
+                "chunk": chunk["key"],
+                "chunk_title": chunk["title"],
+                "concept": chunk["id"],
+                "chunk_index": chunk["index_in_topic"],
+                "chunk_total": chunk["chunk_total"],
+                "title": chunk["title"],
+                "path": str(path) if path.is_file() else None,
+                "missing": not path.is_file(),
+            }
     return {"kind": "new", "topic": None}
 
 
@@ -737,7 +1031,9 @@ def cmd_next(args, ctx: Ctx) -> int:
     if focus["kind"] == "weak":
         lines.append(f"focus: weak topic '{focus['topic']}' ({focus['misses']} miss) — retest it")
     elif focus["kind"] == "chunk":
-        lines.append(f"focus: uncovered chunk {focus['chunk']} — {focus['title']}")
+        where = f"{focus['topic_title']} / {focus['chunk_title']} ({focus['chunk_index']}/{focus['chunk_total']})"
+        suffix = " — no chunk file yet; ask from the outline" if focus.get("missing") else ""
+        lines.append(f"focus: uncovered chunk {where}{suffix}")
     else:
         lines.append("focus: new material")
     if recent_acc is not None:
@@ -760,6 +1056,7 @@ def bump_weak(
     result: str,
     misconception: Optional[str],
     retest: Optional[str],
+    unit: Optional[str] = None,
 ) -> Dict[str, Any]:
     stamp = now_iso()
     record = get_weak(state, subject, topic)
@@ -810,6 +1107,8 @@ def bump_weak(
             record["misconceptions"] = record["misconceptions"][-8:]
     if retest:
         record["retest"] = trim(retest, 600)
+    if unit:
+        record["unit"] = trim(unit, 200)
 
     put_weak(state, subject, topic, record)
     render_weak(ws, subject, topic, record)
@@ -836,7 +1135,7 @@ def cmd_record(args, ctx: Ctx) -> int:
             code=9,
         )
     focus = (pending or {}).get("focus") or {}
-    topic = args.topic or focus.get("topic")
+    topic = args.topic or focus.get("concept") or focus.get("topic")
     topic = slugify(topic) if topic else None
     if args.result in ("wrong", "partial") and not topic:
         return fail(ctx, "a wrong or partial answer needs --topic (the specific concept that failed)", code=6)
@@ -1148,91 +1447,275 @@ def cmd_report(args, ctx: Ctx) -> int:
 # --------------------------------------------------------------------------- #
 
 
+def plan_summary(plan: Dict[str, Any], completed: set) -> "tuple[Dict[str, int], List[Dict[str, Any]]]":
+    counts = roadmap_counts(plan, completed)
+    topics = []
+    for topic in plan["topics"]:
+        topics.append(
+            {
+                "index": topic["index"],
+                "id": topic["id"],
+                "title": topic["title"],
+                "outcome": topic["outcome"],
+                "path": topic["path"],
+                "chunks": [
+                    {
+                        "index": chunk["index_in_topic"],
+                        "id": chunk["id"],
+                        "title": chunk["title"],
+                        "key": chunk["key"],
+                        "path": chunk["path"],
+                        "exists": Path(chunk["path"]).is_file(),
+                        "done": chunk["key"] in completed,
+                    }
+                    for chunk in topic["chunks"]
+                ],
+            }
+        )
+    return counts, topics
+
+
+def teach_blocked(
+    ctx: Ctx,
+    subject: str,
+    label: str,
+    plan: Optional[Dict[str, Any]],
+    errors: List[str],
+) -> int:
+    path = roadmap_json_path(ctx.ws, subject)
+    missing = plan is None and all("is missing" in item for item in errors)
+    if missing:
+        payload = {
+            "ok": False,
+            "reason": "no_plan",
+            "subject": subject,
+            "subject_label": label,
+            "plan": str(path),
+            "message": (
+                "No course roadmap yet. Author topics/<subject>/ROADMAP.json with every "
+                "topic and its chunk titles before teaching. A topic needs 2-8 chunks."
+            ),
+        }
+        human = (
+            f"no roadmap for {label}: {path} is missing\n"
+            "author ROADMAP.json first: at least 2 topics, each with 2-8 chunk titles.\n"
+            "then run: teach plan --subject " + subject
+        )
+    else:
+        payload = {
+            "ok": False,
+            "reason": "invalid_plan",
+            "subject": subject,
+            "subject_label": label,
+            "plan": str(path),
+            "errors": errors,
+            "message": "Fix ROADMAP.json, then run teach plan again.",
+        }
+        human = "roadmap invalid for " + label + ":\n" + "\n".join(f"- {item}" for item in errors)
+        human += "\nfix " + str(path) + ", then run: teach plan --subject " + subject
+    return emit(ctx, payload, human)
+
+
 def cmd_teach(args, ctx: Ctx) -> int:
     state = load_state(ctx.ws)
     if not state_path(ctx.ws).is_file():
         return fail(ctx, f"no practice-loop workspace at {ctx.ws}; run init first", code=3)
+
     subject = slugify(args.subject)
-    chunks = subject_chunks(ctx.ws, subject)
-    progress = state.setdefault("teach", {}).setdefault(
-        subject, {"completed": [], "current": None, "checks": 0, "attempts": {}}
-    )
-    progress.setdefault("completed", [])
-    progress.setdefault("attempts", {})
     label = subject_label(state, subject)
+    progress = teach_progress(state, subject)
+    plan, errors = load_roadmap(ctx.ws, subject)
+
+    if args.action == "plan":
+        if plan is None or errors:
+            return teach_blocked(ctx, subject, label, plan, errors)
+        render_roadmap_md(ctx.ws, state, subject, plan)
+        completed = set(progress["completed"])
+        counts, topics = plan_summary(plan, completed)
+        upcoming = next_plan_chunk(plan, completed)
+        payload = {
+            "ok": True,
+            "subject": subject,
+            "subject_label": label,
+            "title": plan["title"] or label,
+            "outcome": plan["outcome"],
+            "plan": plan["path"],
+            "markdown": plan["markdown"],
+            "counts": counts,
+            "topics": topics,
+            "next": None
+            if upcoming is None
+            else {
+                "topic": upcoming["topic_id"],
+                "topic_title": upcoming["topic_title"],
+                "chunk": upcoming["key"],
+                "chunk_title": upcoming["title"],
+                "path": upcoming["path"],
+                "exists": Path(upcoming["path"]).is_file(),
+            },
+            "valid": True,
+        }
+        lines = [
+            f"roadmap: {payload['title']} — {counts['topics_total']} topics, "
+            f"{counts['chunks_total']} chunks ({counts['chunks_done']} done)"
+        ]
+        if plan["outcome"]:
+            lines.append(f"outcome: {plan['outcome']}")
+        lines.append(f"plan: {plan['path']}")
+        lines.append(f"rendered: {plan['markdown']}")
+        for topic in topics:
+            lines.append(f"{topic['index']}. {topic['title']} ({len(topic['chunks'])} chunks)")
+            for chunk in topic["chunks"]:
+                box = "x" if chunk["done"] else " "
+                lines.append(f"   [{box}] {chunk['index']}. {chunk['title']}")
+        if upcoming is not None:
+            exists = Path(upcoming["path"]).is_file()
+            lines.append("")
+            lines.append(
+                f"next: topic {upcoming['topic_index']}/{len(plan['topics'])} "
+                f"{upcoming['topic_title']} — chunk {upcoming['index_in_topic']}/{upcoming['chunk_total']} "
+                f"{upcoming['title']}"
+            )
+            lines.append(f"chunk file: {upcoming['path']}" + ("" if exists else " (missing — author it first)"))
+        return emit(ctx, payload, "\n".join(lines))
+
+    if plan is None or errors:
+        return teach_blocked(ctx, subject, label, plan, errors)
+
+    completed = set(progress["completed"])
+    counts = roadmap_counts(plan, completed)
 
     if args.action == "next":
-        remaining = [path for path in chunks if path.name not in progress["completed"]]
-        if not chunks:
-            payload = {
-                "ok": False,
-                "reason": "no_chunks",
-                "subject": subject,
-                "subject_label": label,
-                "topics_dir": str(ctx.ws / "topics" / subject),
-                "message": "No teaching chunks yet. Author topics/<subject>/*.md first.",
-            }
-            if ctx.json:
-                print(json.dumps(payload, indent=2, ensure_ascii=False))
-            else:
-                print(f"no chunks in topics/{subject}/ — write 01-*.md, 02-*.md, … first")
-            return 0
-        if not remaining:
+        topic_filter = None
+        if getattr(args, "topic", None):
+            topic_filter = match_topic(plan, args.topic)
+            if topic_filter is None:
+                return fail(
+                    ctx,
+                    f"no topic '{args.topic}' in the roadmap; run teach plan to see the topics",
+                    code=11,
+                    topics=[topic["title"] for topic in plan["topics"]],
+                )
+        chunk = next_plan_chunk(plan, completed, topic_filter)
+        if chunk is None:
+            render_roadmap_md(ctx.ws, state, subject, plan)
+            scoped = f"topic '{topic_filter['title']}'" if topic_filter else "the course"
             payload = {
                 "ok": True,
                 "done": True,
                 "subject": subject,
                 "subject_label": label,
-                "completed": progress["completed"],
-                "message": "All chunks completed. Move to the main flow to prove retention.",
+                "scope": topic_filter["id"] if topic_filter else "course",
+                "counts": counts,
+                "message": f"All chunks in {scoped} are complete. Move to the main flow to prove retention.",
             }
-            return emit(ctx, payload, f"teach: {label} complete ({len(chunks)} chunks) — prove it in the main flow")
-        current = remaining[0]
-        progress["current"] = current.name
+            return emit(
+                ctx,
+                payload,
+                f"teach: {label} — {scoped} complete "
+                f"({counts['chunks_done']}/{counts['chunks_total']} chunks, "
+                f"{counts['topics_done']}/{counts['topics_total']} topics) — prove it in the main flow",
+            )
+
+        path = Path(chunk["path"])
+        if not path.is_file():
+            payload = {
+                "ok": False,
+                "reason": "chunk_missing",
+                "subject": subject,
+                "subject_label": label,
+                "topic": chunk["topic_id"],
+                "topic_title": chunk["topic_title"],
+                "topic_index": chunk["topic_index"],
+                "topic_total": len(plan["topics"]),
+                "chunk": chunk["key"],
+                "chunk_title": chunk["title"],
+                "chunk_index": chunk["index_in_topic"],
+                "chunk_total": chunk["chunk_total"],
+                "path": chunk["path"],
+                "message": (
+                    "Author this one chunk at the given path, then run teach next again. "
+                    "Do not skip it and do not write the whole topic in one file."
+                ),
+            }
+            return emit(
+                ctx,
+                payload,
+                f"chunk not written yet: {chunk['path']}\n"
+                f"author exactly this chunk ({chunk['topic_title']} / {chunk['title']}), then rerun teach next",
+            )
+
+        progress["current"] = chunk["key"]
         save_state(ctx.ws, state)
-        index = chunks.index(current) + 1
+        render_roadmap_md(ctx.ws, state, subject, plan)
         payload = {
             "ok": True,
             "done": False,
             "subject": subject,
             "subject_label": label,
-            "chunk": current.name,
-            "path": str(current),
-            "title": chunk_title(current),
-            "index": index,
-            "total": len(chunks),
+            "topic": chunk["topic_id"],
+            "topic_title": chunk["topic_title"],
+            "topic_index": chunk["topic_index"],
+            "topic_total": len(plan["topics"]),
+            "chunk": chunk["key"],
+            "chunk_title": chunk["title"],
+            "chunk_index": chunk["index_in_topic"],
+            "chunk_total": chunk["chunk_total"],
+            "index": chunk["index"],
+            "total": len(plan["chunks"]),
+            "path": chunk["path"],
+            "counts": counts,
             "completed": progress["completed"],
-            "remaining": [path.name for path in remaining],
+            "remaining": len(plan["chunks"]) - counts["chunks_done"],
         }
         return emit(
             ctx,
             payload,
-            f"teach: {label} chunk {index}/{len(chunks)} — {current.name} ({chunk_title(current)})\n"
-            f"read: {current}",
+            f"teach: {label} — topic {chunk['topic_index']}/{len(plan['topics'])} "
+            f"{chunk['topic_title']}, chunk {chunk['index_in_topic']}/{chunk['chunk_total']} {chunk['title']}\n"
+            f"course progress: {counts['chunks_done']}/{counts['chunks_total']} chunks, "
+            f"{counts['topics_done']}/{counts['topics_total']} topics\n"
+            f"read: {chunk['path']}",
         )
 
     # action == "record"
-    chunk = args.chunk or progress.get("current")
-    if not chunk:
-        return fail(ctx, "no chunk in progress; run teach next first", code=7)
     if args.result not in RESULTS:
         return fail(ctx, f"result must be one of: {', '.join(RESULTS)}")
 
+    candidate = args.chunk or progress.get("current")
+    chunk = resolve_chunk(plan, candidate) if candidate else None
+    if chunk is None:
+        if args.chunk:
+            return fail(
+                ctx,
+                f"no chunk '{args.chunk}' in this roadmap; run teach next to see the current chunk",
+                code=7,
+            )
+        return fail(ctx, "no chunk in progress; run teach next first", code=7)
+
+    topic = slugify(args.topic) if args.topic else chunk["id"]
     progress["checks"] = int(progress.get("checks", 0)) + 1
-    attempts = progress["attempts"].setdefault(chunk, {"correct": 0, "partial": 0, "wrong": 0})
+    attempts = progress["attempts"].setdefault(chunk["key"], {"correct": 0, "partial": 0, "wrong": 0})
     attempts[args.result] = int(attempts.get(args.result, 0)) + 1
 
-    topic = args.topic or slugify(Path(chunk).stem)
-    topic = slugify(topic)
     weak_record = None
     if args.result in ("wrong", "partial"):
         weak_record = bump_weak(
-            ctx.ws, state, subject, topic, "teach", args.result, args.misconception, args.retest
+            ctx.ws,
+            state,
+            subject,
+            topic,
+            "teach",
+            args.result,
+            args.misconception,
+            args.retest,
+            unit=chunk["topic_title"],
         )
     elif args.result == "correct" and args.complete:
-        if chunk not in progress["completed"]:
-            progress["completed"].append(chunk)
-        progress["current"] = None
+        if chunk["key"] not in progress["completed"]:
+            progress["completed"].append(chunk["key"])
+        if progress.get("current") == chunk["key"]:
+            progress["current"] = None
 
     append_history(
         ctx.ws,
@@ -1242,8 +1725,11 @@ def cmd_teach(args, ctx: Ctx) -> int:
             "flow": "teach",
             "subject": subject,
             "subject_label": label,
+            "unit": chunk["topic_id"],
+            "unit_title": chunk["topic_title"],
             "topic": topic,
-            "chunk": chunk,
+            "chunk": chunk["key"],
+            "chunk_title": chunk["title"],
             "type": args.type or "check",
             "result": args.result,
             "question": trim(args.question),
@@ -1253,29 +1739,60 @@ def cmd_teach(args, ctx: Ctx) -> int:
             "concept": trim(args.concept),
         },
     )
-    save_state(ctx.ws, state)
 
-    remaining = [path.name for path in chunks if path.name not in progress["completed"]]
+    completed = set(progress["completed"])
+    topic_done = all(item["key"] in completed for item in plan["topics"][chunk["topic_index"] - 1]["chunks"])
+    counts = roadmap_counts(plan, completed)
+    upcoming = next_plan_chunk(plan, completed)
+    save_state(ctx.ws, state)
+    render_roadmap_md(ctx.ws, state, subject, plan)
+
     payload = {
         "ok": True,
         "subject": subject,
-        "chunk": chunk,
+        "subject_label": label,
+        "unit": chunk["topic_id"],
+        "unit_title": chunk["topic_title"],
+        "topic": topic,
+        "chunk": chunk["key"],
+        "chunk_title": chunk["title"],
         "result": args.result,
+        "chunk_complete": chunk["key"] in completed,
+        "topic_complete": topic_done,
+        "counts": counts,
         "completed": progress["completed"],
-        "remaining": remaining,
-        "chunk_complete": chunk in progress["completed"],
+        "next": None
+        if upcoming is None
+        else {
+            "topic": upcoming["topic_id"],
+            "topic_title": upcoming["topic_title"],
+            "chunk": upcoming["key"],
+            "chunk_title": upcoming["title"],
+            "index": upcoming["index"],
+        },
         "weak": None
         if weak_record is None
         else {"topic": topic, "status": weak_record.get("status"), "misses": weak_record.get("misses")},
     }
+
+    where = f"{label} / {chunk['topic_title']} / {chunk['title']}"
     if weak_record:
-        lines = [f"teach check failed: {label} / {topic} ({weak_record.get('misses')} miss) — saved to weak/"]
+        lines = [f"teach check failed: {where} ({weak_record.get('misses')} miss) — saved to weak/"]
         lines.append("teach this idea again differently, then re-check. No chunk advance.")
-    elif chunk in progress["completed"]:
-        lines = [f"teach check passed: {label} / {chunk} — chunk complete"]
-        lines.append(f"remaining: {len(remaining)}")
+    elif chunk["key"] in completed:
+        lines = [f"teach check passed: {where} — chunk complete"]
+        if topic_done:
+            lines.append(f"topic complete: {chunk['topic_title']} "
+                         f"({counts['topics_done']}/{counts['topics_total']} topics)")
+        lines.append(f"course progress: {counts['chunks_done']}/{counts['chunks_total']} chunks, "
+                     f"{counts['topics_done']}/{counts['topics_total']} topics")
+        if upcoming is not None:
+            lines.append(
+                f"next: {upcoming['topic_title']} — chunk {upcoming['index_in_topic']}/{upcoming['chunk_total']} "
+                f"{upcoming['title']}"
+            )
     else:
-        lines = [f"teach check passed: {label} / {chunk} — pass --complete when the chunk is mastered"]
+        lines = [f"teach check passed: {where} — pass --complete when the chunk is mastered"]
     return emit(ctx, payload, "\n".join(lines))
 
 
@@ -1346,7 +1863,7 @@ def cmd_set(args, ctx: Ctx) -> int:
         state["config"]["continuous"] = args.continuous.lower() in ("1", "true", "yes", "on")
         changed["continuous"] = state["config"]["continuous"]
     if args.subjects:
-        subjects, labels = apply_subjects(state, args.subjects)
+        subjects, _ = apply_subjects(state, args.subjects)
         if not subjects:
             return fail(ctx, "at least one subject is required")
         for slug in subjects:
@@ -1506,8 +2023,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     teach = sub.add_parser("teach", help="teach-flow progress")
     teach_sub = teach.add_subparsers(dest="action", required=True)
+    teach_plan = teach_sub.add_parser("plan", help="validate the course roadmap and render ROADMAP.md")
+    teach_plan.add_argument("--subject", required=True)
+    teach_plan.set_defaults(func=cmd_teach)
     teach_next = teach_sub.add_parser("next", help="next chunk to teach")
     teach_next.add_argument("--subject", required=True)
+    teach_next.add_argument("--topic", help="teach one roadmap topic by name, slug, or number")
     teach_next.set_defaults(func=cmd_teach)
     teach_record = teach_sub.add_parser("record", help="record a teach-flow check")
     teach_record.add_argument("--subject", required=True)

@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,6 +47,30 @@ class PracticeLoopTest(unittest.TestCase):
         for key, value in kwargs.items():
             args += ["--" + key.replace("_", "-"), str(value)]
         return self.run_cli(*args)
+
+    @staticmethod
+    def slug(value):
+        value = str(value).lower().replace("#", "sharp").replace("++", "pp")
+        return re.sub(r"[^a-z0-9]+", "-", value).strip("-") or "general"
+
+    def make_roadmap(self, subject="sql", topics=None, chunk_files=True):
+        topics = topics or [
+            {"title": "Joins", "outcome": "Keep or drop unmatched rows", "chunks": ["Row preservation", "LEFT JOIN nulls"]},
+            {"title": "Aggregation", "outcome": "Aggregate without double counting", "chunks": ["COUNT nulls", "GROUP BY rules"]},
+        ]
+        folder = self.ws / "topics" / subject
+        folder.mkdir(parents=True, exist_ok=True)
+        roadmap = {"title": subject.title(), "outcome": "Test course", "topics": topics}
+        (folder / "ROADMAP.json").write_text(json.dumps(roadmap, indent=2), encoding="utf-8")
+        if chunk_files:
+            for topic_index, topic in enumerate(topics, 1):
+                topic_dir = folder / self.slug(topic.get("id") or topic["title"])
+                topic_dir.mkdir(parents=True, exist_ok=True)
+                for chunk_index, chunk in enumerate(topic["chunks"], 1):
+                    title = chunk if isinstance(chunk, str) else chunk["title"]
+                    path = topic_dir / f"{self.slug(chunk.get('id') if isinstance(chunk, dict) else title)}.md"
+                    path.write_text(f"---\ntitle: {title}\n---\n# {title}\n", encoding="utf-8")
+        return folder
 
     # ------------------------------------------------------------------ #
 
@@ -158,17 +183,160 @@ class PracticeLoopTest(unittest.TestCase):
         self.assertEqual(result["weak"]["misses"], 0)
         self.assertEqual(self.run_cli("weak")["topics"][0]["partials"], 1)
 
+    def test_teach_requires_a_valid_roadmap(self):
+        self.init("--subjects", "sql")
+        missing = self.run_cli("teach", "next", "--subject", "sql")
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["reason"], "no_plan")
+
+        folder = self.ws / "topics" / "sql"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "ROADMAP.json").write_text(
+            json.dumps({"topics": [{"title": "Only topic", "chunks": ["A", "B"]}]}),
+            encoding="utf-8",
+        )
+        one_topic = self.run_cli("teach", "next", "--subject", "sql")
+        self.assertFalse(one_topic["ok"])
+        self.assertEqual(one_topic["reason"], "invalid_plan")
+        self.assertTrue(any("at least 2 topics" in item for item in one_topic["errors"]))
+
+        (folder / "ROADMAP.json").write_text(
+            json.dumps(
+                {
+                    "topics": [
+                        {"title": "Compressed", "chunks": ["One big lesson"]},
+                        {"title": "Second", "chunks": ["A", "B"]},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        one_chunk = self.run_cli("teach", "next", "--subject", "sql")
+        self.assertEqual(one_chunk["reason"], "invalid_plan")
+        self.assertTrue(any("at least 2 chunks" in item for item in one_chunk["errors"]))
+
+        (folder / "ROADMAP.json").write_text(
+            json.dumps(
+                {
+                    "title": "SQL",
+                    "topics": [
+                        {"title": "SQL", "chunks": ["A", "B"]},
+                        {"title": "Joins", "chunks": ["A", "B"]},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        whole_course = self.run_cli("teach", "next", "--subject", "sql")
+        self.assertEqual(whole_course["reason"], "invalid_plan")
+        self.assertTrue(any("repeats the course name" in item for item in whole_course["errors"]))
+
+    def test_teach_plan_renders_topics_and_chunks(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        plan = self.run_cli("teach", "plan", "--subject", "sql")
+        self.assertTrue(plan["valid"])
+        self.assertEqual(plan["counts"]["topics_total"], 2)
+        self.assertEqual(plan["counts"]["chunks_total"], 4)
+        markdown = (self.ws / "topics" / "sql" / "ROADMAP.md").read_text(encoding="utf-8")
+        self.assertIn("## 1. Joins", markdown)
+        self.assertIn("- [ ] 1. Row preservation", markdown)
+        self.assertIn("0/4 chunks", markdown)
+        self.assertIn("0/2 topics complete", markdown)
+
+    def test_teach_walks_topic_then_chunks(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+
+        first = self.run_cli("teach", "next", "--subject", "sql")
+        self.assertEqual(first["chunk"], "joins/row-preservation.md")
+        self.assertEqual(first["topic_title"], "Joins")
+        self.assertEqual(first["chunk_index"], 1)
+        self.assertEqual(first["chunk_total"], 2)
+
+        done = self.run_cli(
+            "teach", "record", "--subject", "sql", "--result", "correct", "--complete"
+        )
+        self.assertTrue(done["chunk_complete"])
+        self.assertFalse(done["topic_complete"])
+
+        second = self.run_cli("teach", "next", "--subject", "sql")
+        self.assertEqual(second["chunk"], "joins/left-join-nulls.md")
+        self.assertEqual(second["topic_title"], "Joins")
+
+        done = self.run_cli(
+            "teach", "record", "--subject", "sql", "--result", "correct", "--complete"
+        )
+        self.assertTrue(done["topic_complete"])
+        self.assertEqual(done["counts"]["topics_done"], 1)
+
+        third = self.run_cli("teach", "next", "--subject", "sql")
+        self.assertEqual(third["chunk"], "aggregation/count-nulls.md")
+        self.assertEqual(third["topic_title"], "Aggregation")
+
+    def test_teach_missing_chunk_file_blocks_the_next_step(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap(chunk_files=False)
+        blocked = self.run_cli("teach", "next", "--subject", "sql")
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["reason"], "chunk_missing")
+        self.assertTrue(blocked["path"].endswith("joins/row-preservation.md"))
+
+        path = Path(blocked["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("---\ntitle: Row preservation\n---\n", encoding="utf-8")
+        ready = self.run_cli("teach", "next", "--subject", "sql")
+        self.assertTrue(ready["ok"])
+        self.assertEqual(ready["chunk"], "joins/row-preservation.md")
+
+    def test_teach_topic_filter_starts_that_topic(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        filtered = self.run_cli("teach", "next", "--subject", "sql", "--topic", "Aggregation")
+        self.assertEqual(filtered["topic_title"], "Aggregation")
+        self.assertEqual(filtered["chunk"], "aggregation/count-nulls.md")
+
+        bad = self.run_cli("teach", "next", "--subject", "sql", "--topic", "Nope", expect=11)
+        self.assertFalse(bad["ok"])
+
+    def test_main_flow_chunk_focus_uses_the_concept_name(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        brief = self.next()
+        self.assertEqual(brief["focus"]["kind"], "chunk")
+        self.assertEqual(brief["focus"]["concept"], "row-preservation")
+        failed = self.record("wrong")
+        self.assertEqual(failed["weak"]["topic"], "row-preservation")
+        self.assertTrue((self.ws / "weak" / "sql" / "row-preservation.md").is_file())
+
+    def test_roadmap_can_grow_without_losing_completed_chunks(self):
+        self.init("--subjects", "sql")
+        self.make_roadmap()
+        self.run_cli("teach", "next", "--subject", "sql")
+        self.run_cli("teach", "record", "--subject", "sql", "--result", "correct", "--complete")
+
+        path = self.ws / "topics" / "sql" / "ROADMAP.json"
+        roadmap = json.loads(path.read_text(encoding="utf-8"))
+        roadmap["topics"].insert(
+            0, {"title": "Foundations", "chunks": ["Core vocabulary", "Mental model"]}
+        )
+        path.write_text(json.dumps(roadmap), encoding="utf-8")
+
+        plan = self.run_cli("teach", "plan", "--subject", "sql")
+        self.assertEqual(plan["counts"]["chunks_total"], 6)
+        self.assertEqual(plan["counts"]["chunks_done"], 1)
+
+        joins = self.run_cli("teach", "next", "--subject", "sql", "--topic", "Joins")
+        self.assertEqual(joins["chunk"], "joins/left-join-nulls.md")
+
     def test_teach_correct_never_clears_weakness(self):
         self.init("--subjects", "sql")
-        (self.ws / "topics" / "sql").mkdir(parents=True, exist_ok=True)
-        (self.ws / "topics" / "sql" / "01-joins.md").write_text(
-            "---\ntitle: Joins\n---\n# Joins\n", encoding="utf-8"
-        )
+        self.make_roadmap()
         self.next()
         self.record("wrong", topic="joins")
 
         check = self.run_cli("teach", "next", "--subject", "sql")
-        self.assertEqual(check["chunk"], "01-joins.md")
+        self.assertEqual(check["chunk"], "joins/row-preservation.md")
         self.run_cli(
             "teach", "record", "--subject", "sql", "--result", "correct", "--complete"
         )
@@ -180,24 +348,23 @@ class PracticeLoopTest(unittest.TestCase):
 
     def test_teach_wrong_saves_weakness_and_does_not_advance(self):
         self.init("--subjects", "sql")
-        folder = self.ws / "topics" / "sql"
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / "01-joins.md").write_text("---\ntitle: Joins\n---\n", encoding="utf-8")
-        (folder / "02-aggregation.md").write_text("---\ntitle: Aggregation\n---\n", encoding="utf-8")
+        self.make_roadmap()
 
         first = self.run_cli("teach", "next", "--subject", "sql")
-        self.assertEqual(first["chunk"], "01-joins.md")
+        self.assertEqual(first["chunk"], "joins/row-preservation.md")
         failed = self.run_cli(
-            "teach", "record", "--subject", "sql", "--result", "wrong", "--topic", "joins"
+            "teach", "record", "--subject", "sql", "--result", "wrong", "--topic", "row-preservation"
         )
         self.assertFalse(failed["chunk_complete"])
+        self.assertEqual(failed["unit_title"], "Joins")
+        self.assertTrue((self.ws / "weak" / "sql" / "row-preservation.md").is_file())
         still = self.run_cli("teach", "next", "--subject", "sql")
-        self.assertEqual(still["chunk"], "01-joins.md")
+        self.assertEqual(still["chunk"], "joins/row-preservation.md")
         self.assertEqual(self.run_cli("weak")["count"], 1)
 
         self.run_cli("teach", "record", "--subject", "sql", "--result", "correct", "--complete")
         moved = self.run_cli("teach", "next", "--subject", "sql")
-        self.assertEqual(moved["chunk"], "02-aggregation.md")
+        self.assertEqual(moved["chunk"], "joins/left-join-nulls.md")
 
     def test_mastered_topic_reopens_after_a_miss(self):
         self.init("--subjects", "sql")

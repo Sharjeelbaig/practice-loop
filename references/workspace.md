@@ -16,8 +16,14 @@ my-practice/
 │           └── aggregation.md
 ├── topics/                 teaching material, one folder per subject
 │   └── sql/
-│       ├── 01-select-basics.md
-│       └── 02-joins.md
+│       ├── ROADMAP.json    course plan: topics, then chunk titles
+│       ├── ROADMAP.md      rendered roadmap with progress checkboxes
+│       ├── select-basics/
+│       │   ├── anatomy-of-a-select.md
+│       │   └── filtering-rows.md
+│       └── joins/
+│           ├── inner-joins.md
+│           └── left-join-nulls.md
 ├── .practice-loop/
 │   ├── state.json          rotation, pending question, teach progress
 │   └── history.jsonl       append-only attempt log
@@ -31,7 +37,7 @@ my-practice/
 | `notes/` | read for grounding | write, rename, reformat, delete |
 | `rough/` | read submissions; create exercise scaffolds under a new subfolder | delete or rewrite the learner's files |
 | `weak/` | create/update through the CLI | hand-edit counters or status |
-| `topics/` | create and update chunks | delete a chunk the learner is mid-way through |
+| `topics/` | create/update the roadmap and chunks through `teach plan` and the paths it names | delete a chunk the learner is mid-way through, or flatten a topic into one file |
 | `.practice-loop/` | write through the CLI | edit by hand while the CLI is available |
 | `HOW-IT-WORKS.md` | read | overwrite an existing copy |
 
@@ -66,6 +72,9 @@ python3 "$CLI" init --dir . --subjects sql,csharp-dsa,oop
 `init` creates `notes/ rough/ weak/ topics/ .practice-loop/`, writes
 `HOW-IT-WORKS.md` if absent, and creates `state.json` with an empty rotation.
 It also creates `topics/<subject>/` for each subject given.
+
+Teaching material is planned separately: write `topics/<subject>/ROADMAP.json`
+and run `teach plan --subject <slug>`. See `authoring.md`.
 
 It is idempotent and additive:
 

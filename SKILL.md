@@ -1,9 +1,9 @@
 ---
 name: practice-loop
-description: Adaptive practice and teaching loop for any subject. Use when the user wants to be quizzed, drilled, or taught with MCQs, coding or SQL exercises, or conceptual questions; when they say practice-loop, practice loop, start practice, quiz me, drill me, test me, teach me, retest my weak topics, or ask what they are weak at; or when the working directory contains a practice-loop workspace (notes/, rough/, weak/, topics/, .practice-loop/). Keeps a strict subject rotation and persistent weakness tracking across sessions and across agents.
+description: Adaptive practice and teaching loop for any subject. Use when the user wants to be quizzed, drilled, or taught with MCQs, coding or SQL exercises, or conceptual questions; when they say practice-loop, practice loop, start practice, quiz me, drill me, test me, teach me, retest my weak topics, or ask what they are weak at; or when the working directory contains a practice-loop workspace (notes/, rough/, weak/, topics/, .practice-loop/). Plans each course as a roadmap of topics, each topic as 2-8 chunks, keeps a strict subject rotation, and tracks weaknesses persistently across sessions and agents.
 license: MIT
 metadata:
-  version: 1.1.0
+  version: 1.2.0
 ---
 
 # Practice Loop
@@ -12,9 +12,15 @@ A drill sergeant and a patient tutor sharing one memory. The learner practises i
 a fixed rotation; failures stick; teaching never counts as proof.
 
 The workspace is the state. `notes/` is the learner's, `rough/` is their scratch
-space, `topics/` is your teaching material, `weak/` is what they got wrong, and
-`.practice-loop/` is machine state. Progress survives session end and switching
-agents.
+space, `topics/` holds each course's roadmap and chunks, `weak/` is what they got
+wrong, and `.practice-loop/` is machine state. Progress survives session end and
+switching agents.
+
+A course is never one topic and a topic is never one lesson:
+
+```text
+subject/course → ROADMAP.json → topics (major units) → 2-8 chunks each → one file per chunk
+```
 
 ## Non-negotiables
 
@@ -33,6 +39,9 @@ agents.
 6. **`notes/` is read-only.** Read it for grounding, never write, move, or
    reformat anything inside it.
 7. **Do not invent progress.** Every number you report comes from the CLI.
+8. **Plan the whole course before teaching it.** Teaching a subject requires a
+   valid `ROADMAP.json`: at least 2 topics, and 2-8 chunks inside every topic.
+   Never compress a course into one topic, or a topic into one chunk.
 
 ## 1. Resolve the CLI and workspace
 
@@ -64,7 +73,8 @@ show the menu — do not start asking questions unasked.
 | --- | --- |
 | `init`, "set this up" | §3 Initialize |
 | `start`, "quiz me", "resume", "continue" | §4 Main flow |
-| `teach`, `teach <subject>`, "explain X" | §5 Teach flow |
+| `teach`, "teach <subject>", "explain X" | §5 Teach flow (plan the course first) |
+| "roadmap", "plan the course", "what will you teach me" | §5.1 Plan the course |
 | "quiz me on my weak topics" | §6 Weakness drill |
 | "what am I weak at", `weak` | `weak --json`, then prioritise |
 | "teach my weak topics" | §5 on those subjects, ordered by misses |
@@ -142,7 +152,10 @@ Then, for that subject:
    Prefer the brief's `focus`:
    - `kind: "weak"` → retest that exact misconception, at the brief's
      difficulty, and pass `--topic <focus.topic>` when recording.
-   - `kind: "chunk"` → draw on that uncovered chunk of `topics/<subject>/`.
+   - `kind: "chunk"` → draw on the planned chunk named by `topic_title` and
+     `chunk_title`. If `missing` is true there is no file yet; ask from the
+     outline using general knowledge. Do not author teaching files in the main
+     flow.
    - `kind: "new"` → breadth, still inside the subject.
 2. **Present it alone.** MCQ → use the interactive question tool with 4
    plausible options, one correct, and shuffle the correct position. Exercise →
@@ -184,13 +197,44 @@ Interruptions:
 
 Teach flow builds understanding; the main flow proves it.
 
+### 5.1 Plan the whole course before teaching
+
+The CLI refuses to teach without a valid roadmap. Build it first.
+
+1. Read `notes/`, the supplied source, or the learner's stated goal.
+2. Design the course end to end: its outcome, **every major topic**, and for
+   each topic **2–8 chunk titles**. A topic is a major unit (Prompting,
+   Embeddings, Arrays, Trees). A chunk is one idea you can teach and check in
+   10–20 minutes.
+3. Write `topics/<subject>/ROADMAP.json` using the schema in
+   `references/authoring.md`. Do not author lesson files yet.
+4. Validate and render it:
+
+```bash
+python3 "$CLI" teach plan --subject sql --json
+```
+
+This writes `topics/<subject>/ROADMAP.md` with a checkbox per chunk. Fix every
+error: at least 2 topics, 2–8 chunks per topic, a topic cannot just repeat the
+course name, no duplicate titles. Check the roadmap against the course outcome:
+if finishing every topic would not achieve it, the roadmap is incomplete. Show
+the roadmap to the learner and get approval before teaching. The roadmap is the
+contract; changing it mid-course is allowed only when the learner asks.
+
+### 5.2 Teach one chunk at a time
+
 ```bash
 python3 "$CLI" teach next --subject sql --json
 ```
 
-If `reason: "no_chunks"`, author the material first with
-`references/authoring.md`: 4–8 small chunks at `topics/<subject>/01-*.md`,
-`02-*.md`, … Each chunk teaches one idea and ends with checks.
+- `reason: "no_plan"` or `"invalid_plan"` → fix the roadmap first; do not teach.
+- `reason: "chunk_missing"` → author **exactly that one file** at `path`, using
+  the topic and chunk title from the brief, then call `teach next` again. Never
+  skip the chunk, merge chunks, or write the whole topic into one file.
+- The brief gives `topic_index/topic_total`, `chunk_index/chunk_total`, and
+  course `counts`. Show that hierarchy, not a flat list.
+- `teach next --topic <name|slug|number>` re-teaches one topic; it never touches
+  the rotation.
 
 Then:
 
@@ -198,14 +242,16 @@ Then:
 2. After each idea, ask one check question and wait. MCQ for recognition,
    exercise for application, "explain why" for understanding.
 3. Wrong or partial → diagnose the misconception, re-teach it a different way
-   (new example, smaller step, counterexample), then check again. Record it:
+   (new example, smaller step, counterexample), then check again. Record the
+   specific concept:
 
 ```bash
 python3 "$CLI" teach record --json --subject sql --result wrong \
   --topic left-join-null --misconception "Thinks LEFT JOIN filters nulls automatically"
 ```
 
-   This writes to `weak/`. The chunk does not advance.
+   This writes to `weak/` and tags it with the roadmap topic. The chunk does not
+   advance.
 4. Only when the learner answers the chunk's checks correctly — typically two
    in a row, unprompted — mark it complete:
 
@@ -213,9 +259,9 @@ python3 "$CLI" teach record --json --subject sql --result wrong \
 python3 "$CLI" teach record --json --subject sql --result correct --complete
 ```
 
-5. Continue to the next chunk automatically. Stop when they ask, or when all
-   chunks are done. At the end say: done teaching, now prove it in the main
-   flow.
+5. Continue to the next chunk automatically. When a topic completes, say so
+   (topic x/y) and keep going. Stop when they ask, or when the course is done.
+   At the end say: done teaching, now prove it in the main flow.
 6. Learner questions are welcome at any point. Answer them fully — teaching is
    where explanation is allowed.
 
@@ -269,8 +315,8 @@ ordered by misses, and keep the main flow's rotation untouched.
   calibration, anti-patterns.
 - `references/grading.md` — grading rubric, execution-verified checking, partial
   credit, misconception naming.
-- `references/authoring.md` — turning topics, URLs, documents, and `notes/` into
-  teachable chunks.
+- `references/authoring.md` — planning a course roadmap, splitting topics into
+  chunks, and writing lesson files.
 - `references/state.md` — full CLI reference, state schema, invariants,
   no-shell fallback.
 - `references/hosts.md` — install and invocation for OpenCode, Claude Code,

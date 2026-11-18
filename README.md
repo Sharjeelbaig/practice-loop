@@ -78,7 +78,7 @@ interview-prep/
 ├── notes/        # yours; the agent reads it, never writes it
 ├── rough/        # your scratch space for solving exercises
 ├── weak/         # topics you missed, taught and retested until cleared
-├── topics/       # small teaching chunks, one folder per subject
+├── topics/       # each course: ROADMAP.json → topic folders → chunk files
 └── .practice-loop/
     ├── state.json
     └── history.jsonl
@@ -112,9 +112,17 @@ default.
 
 ### Teach flow — `teach`
 
-The agent writes `topics/<subject>/01-*.md`, `02-*.md`, … in small chunks, then
-teaches one idea at a time, checking after each one. A failed check means
-re-teaching a different way, not moving on. Correct checks close the chunk.
+Teaching is planned as a course, not improvised file by file:
+
+```text
+course → ROADMAP.json → topics → 2–8 chunks per topic → one .md per chunk
+```
+
+Before the first lesson the agent writes a complete roadmap of topics and chunk
+titles, validates it, and shows it to you. `teach` then walks that roadmap one
+chunk at a time: teach one idea, check it, re-teach a different way if needed,
+and close the chunk only when you answer correctly. A topic is never one lesson,
+and a course is never one topic — the CLI rejects both.
 
 Correct answers in the teach flow **never** clear a weakness. Only a correct
 answer in the main flow does. Teaching proves you followed an explanation; the

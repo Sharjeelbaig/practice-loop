@@ -1,17 +1,115 @@
-# Authoring teaching chunks
+# Authoring a course: roadmap, topics, chunks
 
-Chunks are the teach flow's material. They are also the main flow's source of
-truth for coverage. Write them small, concrete, and checkable.
+Teaching material has three levels:
+
+```text
+subject/course          rotation unit, e.g. "Generative and Agentic AI Basics"
+└── ROADMAP.json        every topic, in order, with its chunk titles
+    └── topic/          a major unit, e.g. "Prompting"
+        └── chunk.md    one idea, one file, 10–20 minutes
+```
+
+A course is never one topic. A topic is never one lesson. If a plan has one
+topic, or a topic has one chunk, the plan is wrong and the CLI rejects it.
 
 ## When to author
 
-- `teach next` returned `reason: "no_chunks"`.
-- The learner added a subject and wants to be taught it.
+- The learner says `teach <subject>` and no roadmap exists.
 - The learner supplied a URL, document, or notes and asked to be taught from it.
-- A chunk is stale or wrong and the learner asks to fix it.
+- A topic or chunk is stale or wrong and the learner asks to fix it.
+- The learner reached a `chunk_missing` brief.
 
-Do not author chunks just to fill space before a main-flow question. The main
+Do not author a roadmap just to fill space before a main-flow question. The main
 flow can run with no `topics/` at all.
+
+## Step 1 — plan the whole course first
+
+Read the source material before naming anything. Then decide the course outcome
+and the complete list of topics — not just the first one. Write
+`topics/<subject>/ROADMAP.json`:
+
+```json
+{
+  "title": "Generative and Agentic AI Basics",
+  "outcome": "Understand how LLM applications work end to end.",
+  "topics": [
+    {
+      "title": "How LLMs generate text",
+      "outcome": "Explain next-token prediction and sampling.",
+      "chunks": [
+        "Next-token prediction",
+        "Probability and sampling",
+        "Temperature and top-p",
+        "Context windows"
+      ]
+    },
+    {
+      "title": "Prompting",
+      "outcome": "Write prompts that constrain the model.",
+      "chunks": [
+        "Anatomy of a prompt",
+        "Instructions vs examples",
+        "Failure modes"
+      ]
+    }
+  ]
+}
+```
+
+Rules:
+
+- **At least 2 topics.** A course with one topic is a compressed course.
+- **2–8 chunks per topic.** More than eight means the topic is really two topics.
+- A topic title cannot repeat the course name; `SQL → topic SQL` is rejected.
+- Topics are ordered; chunks are ordered. Lexical order is not used.
+- Paths are `<topic-slug>/<chunk-slug>.md`, so you can add a topic or chunk
+  anywhere without breaking completed progress. Use an explicit `"id"` if a
+  title may change.
+- Titles are learner-facing and concrete. "Prompting" is a topic;
+  "Temperature and top-p" is a chunk.
+- No duplicate topic titles, and no duplicate chunk titles inside a topic.
+- `outcome` is optional but recommended: one sentence per course and per topic.
+- Slugs and file paths are derived from titles. Give a topic or chunk an
+  optional `"id"` when you need the path to survive a title change. Once
+  teaching starts, do not rename a title without an id unless the learner
+  agrees; a rename makes that chunk look uncovered again.
+
+Then validate and render:
+
+```bash
+python3 "$CLI" teach plan --subject <subject> --json
+```
+
+`teach plan` writes `topics/<subject>/ROADMAP.md` with a checkbox per chunk and
+returns the full tree. Fix every error before teaching. Show the roadmap to the
+learner and get approval; it is the contract for the course.
+
+The CLI derives this layout from the JSON:
+
+```text
+topics/generative-and-agentic-ai-basics/
+├── ROADMAP.json
+├── ROADMAP.md
+├── how-llms-generate-text/
+│   ├── next-token-prediction.md
+│   ├── probability-and-sampling.md
+│   └── ...
+└── prompting/
+    ├── anatomy-of-a-prompt.md
+    └── ...
+```
+
+Do not create the chunk files during planning. They are authored one at a time,
+when `teach next` asks for them.
+
+## Step 2 — author one chunk when asked
+
+`teach next` returns `reason: "chunk_missing"` with an exact `path`, plus the
+topic and chunk title. Write only that file, then call `teach next` again.
+
+- One idea per chunk. If the title needs "and also", split it in the roadmap.
+- 60–150 lines. Long enough to teach, short enough for one sitting.
+- Ground every claim in the source.
 
 ## Grounding
 
@@ -35,36 +133,20 @@ Rules:
   supplement. Do not silently pad with invented specifics.
 - Put the provenance in the frontmatter: a path, a URL, or `general knowledge`.
 
-## Shape
-
-```text
-topics/<subject>/
-├── 01-select-basics.md
-├── 02-joins.md
-├── 03-aggregation.md
-└── 04-subqueries.md
-```
-
-- Zero-pad the prefix so lexical sort equals teaching order.
-- One idea per chunk. If a chunk needs two "and also" sentences in its title,
-  split it.
-- 4–8 chunks for a focused topic, 8–15 for a broad subject. More than that and
-  the main flow will take weeks to cover it.
-- 60–150 lines each. Long enough to teach, short enough to finish in one sitting.
-
-## Template
+## Chunk template
 
 ```markdown
 ---
 subject: sql
+topic: joins
 chunk: 02
-title: Joins and row preservation
-prerequisites: [01-select-basics]
-concepts: [inner-join, left-join, join-predicate, null-extension]
+title: LEFT JOIN and row preservation
+prerequisites: [01-inner-joins]
+concepts: [left-join, join-predicate, null-extension]
 source: notes/sql-notes.md
 ---
 
-# Joins and row preservation
+# LEFT JOIN and row preservation
 
 ## Core idea
 
@@ -106,28 +188,31 @@ what happens to rows that find no match.
 
 ## Updating
 
-- Revise a chunk in place when it is wrong or unclear.
+- Revise one chunk in place when it is wrong or unclear.
 - Do not delete a chunk the learner is mid-way through; edit and re-teach it.
-- If you split a chunk, keep the old filename as a short pointer or rename
-  consistently and tell the learner. `teach` tracks completed files by name, so
-  a rename will make it look uncovered again — that is acceptable, but say so.
+- If a chunk must split, add a new chunk to the roadmap rather than renaming the
+  current one. Completed progress is keyed by `topic-id/chunk-file`.
+- Renaming a title changes its slug and path (unless the item has an explicit
+  `id`) and makes the chunk look uncovered. Say so before doing it.
 - Never write into `notes/`. If the learner's material needs correcting, tell
   them; do not edit it.
 
 ## Example: from a URL
 
 1. Fetch the page. Extract headings and code blocks.
-2. Map the page's sections onto 4–8 chunks in teaching order, not page order if
-   the page is reference-shaped.
-3. Put the URL in `source:`.
-4. Teach only what the page supports. If the learner asks beyond it, answer, but
+2. Group sections into 3–8 topics in teaching order, not page order if the page
+   is reference-shaped.
+3. Split each topic into 2–8 chunks, one idea each.
+4. Put the URL in `source:`.
+5. Teach only what the page supports. If the learner asks beyond it, answer, but
    mark the answer as supplementary and do not put it in the chunk as if the
    source said it.
 
 ## Example: from `notes/`
 
 1. Read every file under `notes/` that matches the subject.
-2. Prefer the learner's own phrasing and examples.
-3. If their notes contain an error, do not copy it into a chunk silently. Teach
+2. Map their headings onto topics, and their sub-points onto chunks.
+3. Prefer the learner's own phrasing and examples.
+4. If their notes contain an error, do not copy it into a chunk silently. Teach
    the correct version and mention the discrepancy once.
-4. `source:` should name the files used.
+5. `source:` should name the files used.
