@@ -123,7 +123,8 @@ first, then apply only the changed values with `set --subjects …`,
 overwrites notes, rough work, or existing state.
 
 Go straight into §4. Do not print a summary and wait; the first question is the
-confirmation.
+confirmation. If the learner asked to be taught rather than quizzed, plan the
+whole course first (§5.1) — never open a lesson file and start explaining.
 
 ## 4. Main flow
 
